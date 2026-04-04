@@ -121,9 +121,7 @@ function getHTMLContent() {
           const [presets, setPresets] = useState([]);
           const [loading, setLoading] = useState(false);
           const [showGroupModal, setShowGroupModal] = useState(false);
-          const [showMediaModal, setShowMediaModal] = useState(false);
-          const [mediaItems, setMediaItems] = useState([]);
-          const [currentMediaPath, setCurrentMediaPath] = useState('');
+
           const [lastApiCall, setLastApiCall] = useState(null);
           const [apiCallHistory, setApiCallHistory] = useState([]);
 
@@ -146,7 +144,11 @@ function getHTMLContent() {
               };
               
               setLastApiCall(callInfo);
-              setApiCallHistory(prev => [callInfo, ...prev]);
+              
+              // Only add to history if it's not a now_playing call
+              if (!endpoint.includes('/now_playing')) {
+                setApiCallHistory(prev => [callInfo, ...prev]);
+              }
               
               return responseText;
             } catch (error) {
@@ -159,7 +161,11 @@ function getHTMLContent() {
                 timestamp: new Date().toLocaleTimeString()
               };
               setLastApiCall(errorInfo);
-              setApiCallHistory(prev => [errorInfo, ...prev]);
+              
+              // Only add errors to history if it's not a now_playing call
+              if (!endpoint.includes('/now_playing')) {
+                setApiCallHistory(prev => [errorInfo, ...prev]);
+              }
               return null;
             }
           };
@@ -320,46 +326,6 @@ function getHTMLContent() {
               }).filter(p => p.name && p.name !== 'Preset ' + p.id);
               
               setPresets(presetList);
-            }
-          };
-
-          const browseMedia = async (location = '') => {
-            if (!selectedSpeaker) return;
-            
-            const xml = '<ContentItem source="STORED_MUSIC" type="dir" location="' + location + '" sourceAccount="4d696e69-444c-164e-9d41-c46e1faa21b9/0"><itemName>Music Library</itemName></ContentItem>';
-            const response = await sendCommand(selectedSpeaker, '/browse', 'POST', xml);
-            
-            if (response) {
-              const parser = new DOMParser();
-              const xml = parser.parseFromString(response, 'text/xml');
-              const items = xml.querySelectorAll('item');
-              
-              const mediaList = Array.from(items).map(item => ({
-                name: item.querySelector('itemName')?.textContent || 'Unknown',
-                type: item.getAttribute('type'),
-                location: item.getAttribute('location') || '',
-                source: item.getAttribute('source'),
-                sourceAccount: item.getAttribute('sourceAccount') || ''
-              }));
-              
-              setMediaItems(mediaList);
-              setCurrentMediaPath(location);
-            }
-          };
-
-          const playMedia = async (item) => {
-            const sourceAccount = item.sourceAccount || '4d696e69-444c-164e-9d41-c46e1faa21b9/0';
-            const xml = '<ContentItem source="' + item.source + '" type="' + item.type + '" location="' + item.location + '" sourceAccount="' + sourceAccount + '"><itemName>' + item.name + '</itemName></ContentItem>';
-            await sendGroupCommand('/select', 'POST', xml);
-            setShowMediaModal(false);
-            setTimeout(() => fetchNowPlaying(), 1000);
-          };
-
-          const navigateMedia = async (item) => {
-            if (item.type === 'dir') {
-              await browseMedia(item.location);
-            } else {
-              await playMedia(item);
             }
           };
 
@@ -536,37 +502,22 @@ function getHTMLContent() {
                         />
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4">
-                        {presets.length > 0 && (
-                          <div>
-                            <h3 className="text-slate-300 font-medium mb-3">Presets</h3>
-                            <div className="grid grid-cols-1 gap-2">
-                              {presets.slice(0, 4).map((preset) => (
-                                <button
-                                  key={preset.id}
-                                  onClick={() => selectPreset(preset.id)}
-                                  className="px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-sm font-medium truncate text-left"
-                                >
-                                  {preset.name}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
+                      {presets.length > 0 && (
                         <div>
-                          <h3 className="text-slate-300 font-medium mb-3">Stored Music</h3>
-                          <button
-                            onClick={() => {
-                              setShowMediaModal(true);
-                              browseMedia('');
-                            }}
-                            className="w-full px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition text-sm font-medium"
-                          >
-                            Browse Library
-                          </button>
+                          <h3 className="text-slate-300 font-medium mb-3">Presets</h3>
+                          <div className="grid grid-cols-2 gap-2">
+                            {presets.map((preset) => (
+                              <button
+                                key={preset.id}
+                                onClick={() => selectPreset(preset.id)}
+                                className="px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-sm font-medium truncate text-left"
+                              >
+                                {preset.name}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -665,61 +616,6 @@ function getHTMLContent() {
                         Close
                       </button>
                     </div>
-                  </div>
-                </div>
-              )}
-
-              {showMediaModal && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                  <div className="bg-slate-800 rounded-2xl p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto border border-slate-700">
-                    <div className="flex items-center justify-between mb-4">
-                      <h2 className="text-2xl font-bold text-white">Music Library</h2>
-                      {currentMediaPath && (
-                        <button
-                          onClick={() => browseMedia('')}
-                          className="px-3 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm"
-                        >
-                          ← Back to Root
-                        </button>
-                      )}
-                    </div>
-                    
-                    {currentMediaPath && (
-                      <p className="text-slate-400 text-sm mb-4">Path: {currentMediaPath || '/'}</p>
-                    )}
-
-                    <div className="space-y-2 mb-6">
-                      {mediaItems.length === 0 ? (
-                        <p className="text-slate-400 text-center py-8">No items found or loading...</p>
-                      ) : (
-                        mediaItems.map((item, idx) => (
-                          <button
-                            key={idx}
-                            onClick={() => navigateMedia(item)}
-                            className="w-full px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-left flex items-center gap-2"
-                          >
-                            {item.type === 'dir' ? (
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                              </svg>
-                            ) : (
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <circle cx="12" cy="12" r="10"/>
-                                <polygon points="10 8 16 12 10 16 10 8"/>
-                              </svg>
-                            )}
-                            <span className="font-medium">{item.name}</span>
-                          </button>
-                        ))
-                      )}
-                    </div>
-
-                    <button
-                      onClick={() => setShowMediaModal(false)}
-                      className="w-full px-4 py-3 bg-slate-600 hover:bg-slate-500 text-white rounded-lg font-medium transition"
-                    >
-                      Close
-                    </button>
                   </div>
                 </div>
               )}
