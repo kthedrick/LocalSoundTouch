@@ -146,7 +146,7 @@ function getHTMLContent() {
               };
               
               setLastApiCall(callInfo);
-              setApiCallHistory(prev => [callInfo, ...prev].slice(0, 2));
+              setApiCallHistory(prev => [callInfo, ...prev]);
               
               return responseText;
             } catch (error) {
@@ -159,7 +159,7 @@ function getHTMLContent() {
                 timestamp: new Date().toLocaleTimeString()
               };
               setLastApiCall(errorInfo);
-              setApiCallHistory(prev => [errorInfo, ...prev].slice(0, 2));
+              setApiCallHistory(prev => [errorInfo, ...prev]);
               return null;
             }
           };
@@ -573,30 +573,40 @@ function getHTMLContent() {
 
                 {apiCallHistory.length > 0 && (
                   <div className="mt-4 bg-slate-900 rounded-xl p-4 border border-slate-700">
-                    <h3 className="text-slate-300 font-medium mb-3 text-sm">Last 2 API Calls</h3>
-                    {apiCallHistory.map((call, idx) => (
-                      <div key={idx} className={idx > 0 ? 'mt-4 pt-4 border-t border-slate-700' : ''}>
-                        <h4 className="text-slate-400 text-xs mb-2">Call #{idx + 1} ({call.timestamp})</h4>
-                        <div className="space-y-2 text-xs font-mono">
-                          <div>
-                            <span className="text-slate-400">Method:</span>
-                            <span className="text-blue-400 ml-2">{call.method}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">URL:</span>
-                            <span className="text-green-400 ml-2 break-all">{call.url}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">Body:</span>
-                            <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto">{call.body}</pre>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">Response:</span>
-                            <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">{call.response}</pre>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-slate-300 font-medium text-sm">API Call History ({apiCallHistory.length} calls)</h3>
+                      <button
+                        onClick={() => setApiCallHistory([])}
+                        className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition"
+                      >
+                        Clear History
+                      </button>
+                    </div>
+                    <div className="max-h-96 overflow-y-auto space-y-4">
+                      {apiCallHistory.map((call, idx) => (
+                        <div key={idx} className={idx > 0 ? 'pt-4 border-t border-slate-700' : ''}>
+                          <h4 className="text-slate-400 text-xs mb-2">Call #{apiCallHistory.length - idx} ({call.timestamp})</h4>
+                          <div className="space-y-2 text-xs font-mono">
+                            <div>
+                              <span className="text-slate-400">Method:</span>
+                              <span className="text-blue-400 ml-2">{call.method}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">URL:</span>
+                              <span className="text-green-400 ml-2 break-all">{call.url}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">Body:</span>
+                              <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto">{call.body}</pre>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">Response:</span>
+                              <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">{call.response}</pre>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
