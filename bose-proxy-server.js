@@ -172,8 +172,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
             await Promise.all([
               fetchVolume(speaker),
               fetchNowPlaying(speaker),
-              fetchPresets(speaker),
-              fetchSources(speaker)
+              fetchPresets(speaker)
             ]);
             
             setLoading(false);
@@ -267,7 +266,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
             const response = await sendCommand(speaker, '/info');
             if (!response) return null;
             
-            const match = response.match(/<deviceID>(.*?)<\\/deviceID>/);
+            const match = response.match(/<deviceID>([^<]+)<\/deviceID>/);
             return match ? match[1] : null;
           };
 
@@ -275,7 +274,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
             if (!speaker) return;
             const response = await sendCommand(speaker, '/volume');
             if (response) {
-              const match = response.match(/<actualvolume>(\\d+)<\\/actualvolume>/);
+              const match = response.match(/<actualvolume>(\d+)<\/actualvolume>/);
               if (match) setVolume(parseInt(match[1]));
             }
           };
@@ -321,29 +320,42 @@ const HTML_CONTENT = `<!DOCTYPE html>
             }
           };
 
-          const fetchSources = async (speaker = selectedSpeaker) => {
-            if (!speaker) return;
-            const response = await sendCommand(speaker, '/sources');
+          const browseMedia = async (location = '') => {
+            if (!selectedSpeaker) return;
+            
+            const xml = '<ContentItem source="STORED_MUSIC" type="dir" location="' + location + '" sourceAccount=""><itemName>Music Library</itemName></ContentItem>';
+            const response = await sendCommand(selectedSpeaker, '/browse', 'POST', xml);
+            
             if (response) {
               const parser = new DOMParser();
               const xml = parser.parseFromString(response, 'text/xml');
-              const sourceNodes = xml.querySelectorAll('sourceItem');
+              const items = xml.querySelectorAll('item');
               
-              const sourceList = Array.from(sourceNodes).map(source => ({
-                name: source.getAttribute('source'),
-                status: source.getAttribute('status'),
-                isLocal: source.getAttribute('sourceAccount') === ''
-              })).filter(s => s.status === 'READY');
+              const mediaList = Array.from(items).map(item => ({
+                name: item.querySelector('itemName')?.textContent || 'Unknown',
+                type: item.getAttribute('type'),
+                location: item.getAttribute('location') || '',
+                source: item.getAttribute('source')
+              }));
               
-              setSources(sourceList);
+              setMediaItems(mediaList);
+              setCurrentMediaPath(location);
             }
           };
 
-          const selectSource = async (sourceName) => {
-            const xml = '<ContentItem source="' + sourceName + '" sourceAccount=""><itemName>' + sourceName + '</itemName></ContentItem>';
+          const playMedia = async (item) => {
+            const xml = '<ContentItem source="' + item.source + '" type="' + item.type + '" location="' + item.location + '" sourceAccount=""><itemName>' + item.name + '</itemName></ContentItem>';
             await sendGroupCommand('/select', 'POST', xml);
-            setShowSourcesModal(false);
+            setShowMediaModal(false);
             setTimeout(() => fetchNowPlaying(), 1000);
+          };
+
+          const navigateMedia = async (item) => {
+            if (item.type === 'dir') {
+              await browseMedia(item.location);
+            } else {
+              await playMedia(item);
+            }
           };
 
           const setVolumeLevel = async (level) => {
