@@ -77,11 +77,11 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n🎵 Bose SoundTouch Controller running at http://localhost:${PORT}`);
-  console.log(`Open your browser to http://localhost:${PORT}\n`);
+  console.log(\`\\n🎵 Bose SoundTouch Controller running at http://localhost:\${PORT}\`);
+  console.log(\`Open your browser to http://localhost:\${PORT}\\n\`);
 });
 
-const HTML_CONTENT = `<!DOCTYPE html>
+const HTML_CONTENT = \`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -112,17 +112,19 @@ const HTML_CONTENT = `<!DOCTYPE html>
         ];
 
         function BoseSoundTouchController() {
-          const [selectedSpeakers, setSelectedSpeakers] = useState([]);
-          const [primarySpeaker, setPrimarySpeaker] = useState(null);
+          const [selectedSpeaker, setSelectedSpeaker] = useState(null);
+          const [groupedSpeakers, setGroupedSpeakers] = useState([]);
           const [volume, setVolume] = useState(50);
           const [nowPlaying, setNowPlaying] = useState(null);
           const [presets, setPresets] = useState([]);
+          const [sources, setSources] = useState([]);
           const [loading, setLoading] = useState(false);
-          const [groupMode, setGroupMode] = useState(false);
+          const [showGroupModal, setShowGroupModal] = useState(false);
+          const [showSourcesModal, setShowSourcesModal] = useState(false);
 
           const sendCommand = async (speaker, endpoint, method = 'GET', body = null) => {
             try {
-              const response = await fetch(\`/api/\${speaker.ip}\${endpoint}\`, {
+              const response = await fetch(\\\`/api/\\\${speaker.ip}\\\${endpoint}\\\`, {
                 method,
                 headers: body ? { 'Content-Type': 'application/xml' } : {},
                 body
@@ -135,79 +137,73 @@ const HTML_CONTENT = `<!DOCTYPE html>
           };
 
           const sendGroupCommand = async (endpoint, method = 'GET', body = null) => {
-            const promises = selectedSpeakers.map(speaker => 
+            const speakers = groupedSpeakers.length > 0 ? [selectedSpeaker, ...groupedSpeakers] : [selectedSpeaker];
+            const promises = speakers.map(speaker => 
               sendCommand(speaker, endpoint, method, body)
             );
             return await Promise.all(promises);
           };
 
-          const toggleSpeakerSelection = (speaker) => {
-            if (groupMode) {
-              setSelectedSpeakers(prev => {
-                const isSelected = prev.some(s => s.ip === speaker.ip);
-                if (isSelected) {
-                  const newSelection = prev.filter(s => s.ip !== speaker.ip);
-                  if (primarySpeaker?.ip === speaker.ip) {
-                    setPrimarySpeaker(newSelection[0] || null);
-                  }
-                  return newSelection;
-                } else {
-                  const newSelection = [...prev, speaker];
-                  if (!primarySpeaker) {
-                    setPrimarySpeaker(speaker);
-                  }
-                  return newSelection;
-                }
-              });
-            } else {
-              selectSingleSpeaker(speaker);
-            }
-          };
-
-          const selectSingleSpeaker = async (speaker) => {
-            setSelectedSpeakers([speaker]);
-            setPrimarySpeaker(speaker);
+          const selectSpeaker = async (speaker) => {
+            setSelectedSpeaker(speaker);
+            setGroupedSpeakers([]);
             setLoading(true);
             
             await Promise.all([
               fetchVolume(speaker),
               fetchNowPlaying(speaker),
-              fetchPresets(speaker)
+              fetchPresets(speaker),
+              fetchSources(speaker)
             ]);
             
             setLoading(false);
           };
 
-          const createZone = async () => {
-            if (selectedSpeakers.length < 2 || !primarySpeaker) return;
-            
-            const masterDeviceId = await getDeviceId(primarySpeaker);
-            if (!masterDeviceId) return;
+          const toggleGroupSpeaker = (speaker) => {
+            setGroupedSpeakers(prev => {
+              const isGrouped = prev.some(s => s.ip === speaker.ip);
+              if (isGrouped) {
+                return prev.filter(s => s.ip !== speaker.ip);
+              } else {
+                return [...prev, speaker];
+              }
+            });
+          };
 
-            for (const speaker of selectedSpeakers) {
-              if (speaker.ip === primarySpeaker.ip) continue;
-              
+          const createZone = async () => {
+            if (groupedSpeakers.length === 0) return;
+            
+            const masterDeviceId = await getDeviceId(selectedSpeaker);
+            if (!masterDeviceId) {
+              alert('Could not get master device ID');
+              return;
+            }
+
+            for (const speaker of groupedSpeakers) {
               const slaveDeviceId = await getDeviceId(speaker);
               if (!slaveDeviceId) continue;
 
-              const xml = \`<?xml version="1.0" encoding="UTF-8"?>
-<zone master="\${masterDeviceId}">
-  <member ipaddress="\${speaker.ip}">\${slaveDeviceId}</member>
-</zone>\`;
+              const xml = \\\`<?xml version="1.0" encoding="UTF-8"?>
+<zone master="\\\${masterDeviceId}">
+  <member ipaddress="\\\${speaker.ip}">\\\${slaveDeviceId}</member>
+</zone>\\\`;
               
-              await sendCommand(primarySpeaker, '/setZone', 'POST', xml);
+              await sendCommand(selectedSpeaker, '/setZone', 'POST', xml);
             }
             
-            alert(\`Zone created with \${primarySpeaker.name} as master!\`);
+            setShowGroupModal(false);
+            alert(\\\`Zone created! \\\${selectedSpeaker.name} is the master.\\\`);
           };
 
           const removeZone = async () => {
-            if (!primarySpeaker) return;
+            const xml = \\\`<?xml version="1.0" encoding="UTF-8"?><zone />\\\`;
+            await sendCommand(selectedSpeaker, '/removeZone', 'POST', xml);
             
-            const xml = \`<?xml version="1.0" encoding="UTF-8"?>
-<zone master="" />\`;
+            for (const speaker of groupedSpeakers) {
+              await sendCommand(speaker, '/removeZone', 'POST', xml);
+            }
             
-            await sendCommand(primarySpeaker, '/removeZone', 'POST', xml);
+            setGroupedSpeakers([]);
             alert('Zone removed!');
           };
 
@@ -215,20 +211,20 @@ const HTML_CONTENT = `<!DOCTYPE html>
             const response = await sendCommand(speaker, '/info');
             if (!response) return null;
             
-            const match = response.match(/<deviceID>(.*?)<\\/deviceID>/);
+            const match = response.match(/<deviceID>(.*?)<\\\\/deviceID>/);
             return match ? match[1] : null;
           };
 
-          const fetchVolume = async (speaker = primarySpeaker) => {
+          const fetchVolume = async (speaker = selectedSpeaker) => {
             if (!speaker) return;
             const response = await sendCommand(speaker, '/volume');
             if (response) {
-              const match = response.match(/<actualvolume>(\\d+)<\\/actualvolume>/);
+              const match = response.match(/<actualvolume>(\\\\d+)<\\\\/actualvolume>/);
               if (match) setVolume(parseInt(match[1]));
             }
           };
 
-          const fetchNowPlaying = async (speaker = primarySpeaker) => {
+          const fetchNowPlaying = async (speaker = selectedSpeaker) => {
             if (!speaker) return;
             const response = await sendCommand(speaker, '/now_playing');
             if (response) {
@@ -245,7 +241,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
             }
           };
 
-          const fetchPresets = async (speaker = primarySpeaker) => {
+          const fetchPresets = async (speaker = selectedSpeaker) => {
             if (!speaker) return;
             const response = await sendCommand(speaker, '/presets');
             if (response) {
@@ -260,50 +256,72 @@ const HTML_CONTENT = `<!DOCTYPE html>
                 
                 return {
                   id: id,
-                  name: itemName || \`Preset \${id}\`,
+                  name: itemName || \\\`Preset \\\${id}\\\`,
                   source: source || ''
                 };
-              }).filter(p => p.name && p.name !== \`Preset \${p.id}\`);
+              }).filter(p => p.name && p.name !== \\\`Preset \\\${p.id}\\\`);
               
               setPresets(presetList);
             }
           };
 
+          const fetchSources = async (speaker = selectedSpeaker) => {
+            if (!speaker) return;
+            const response = await sendCommand(speaker, '/sources');
+            if (response) {
+              const parser = new DOMParser();
+              const xml = parser.parseFromString(response, 'text/xml');
+              const sourceNodes = xml.querySelectorAll('sourceItem');
+              
+              const sourceList = Array.from(sourceNodes).map(source => ({
+                name: source.getAttribute('source'),
+                status: source.getAttribute('status'),
+                isLocal: source.getAttribute('sourceAccount') === ''
+              })).filter(s => s.status === 'READY');
+              
+              setSources(sourceList);
+            }
+          };
+
+          const selectSource = async (sourceName) => {
+            const xml = \\\`<ContentItem source="\\\${sourceName}" sourceAccount=""><itemName>\\\${sourceName}</itemName></ContentItem>\\\`;
+            await sendGroupCommand('/select', 'POST', xml);
+            setShowSourcesModal(false);
+            setTimeout(() => fetchNowPlaying(), 1000);
+          };
+
           const setVolumeLevel = async (level) => {
-            const xml = \`<volume>\${level}</volume>\`;
+            const xml = \\\`<volume>\\\${level}</volume>\\\`;
             await sendGroupCommand('/volume', 'POST', xml);
             setVolume(level);
           };
 
           const pressKey = async (key) => {
-            const xml = \`<key state="press" sender="Gabbo">\${key}</key>\`;
+            const xml = \\\`<key state="press" sender="Gabbo">\\\${key}</key>\\\`;
             await sendGroupCommand('/key', 'POST', xml);
             
-            const releaseXml = \`<key state="release" sender="Gabbo">\${key}</key>\`;
+            const releaseXml = \\\`<key state="release" sender="Gabbo">\\\${key}</key>\\\`;
             setTimeout(() => sendGroupCommand('/key', 'POST', releaseXml), 100);
             
             setTimeout(() => fetchNowPlaying(), 500);
           };
 
           const selectPreset = async (presetId) => {
-            const xml = \`<key state="press" sender="Gabbo">PRESET_\${presetId}</key>\`;
+            const xml = \\\`<key state="press" sender="Gabbo">PRESET_\\\${presetId}</key>\\\`;
             await sendGroupCommand('/key', 'POST', xml);
             
-            const releaseXml = \`<key state="release" sender="Gabbo">PRESET_\${presetId}</key>\`;
+            const releaseXml = \\\`<key state="release" sender="Gabbo">PRESET_\\\${presetId}</key>\\\`;
             setTimeout(() => sendGroupCommand('/key', 'POST', releaseXml), 100);
             
             setTimeout(() => fetchNowPlaying(), 1000);
           };
 
           useEffect(() => {
-            if (primarySpeaker) {
+            if (selectedSpeaker) {
               const interval = setInterval(() => fetchNowPlaying(), 5000);
               return () => clearInterval(interval);
             }
-          }, [primarySpeaker]);
-
-          const isSelected = (speaker) => selectedSpeakers.some(s => s.ip === speaker.ip);
-          const isPrimary = (speaker) => primarySpeaker?.ip === speaker.ip;
+          }, [selectedSpeaker]);
 
           return (
             <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6">
@@ -314,32 +332,15 @@ const HTML_CONTENT = `<!DOCTYPE html>
                     <p className="text-blue-100 text-sm">Multi-room audio management</p>
                   </div>
 
-                  {selectedSpeakers.length === 0 ? (
+                  {!selectedSpeaker ? (
                     <div className="p-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-xl font-semibold text-white">Select Speaker(s)</h2>
-                        <button
-                          onClick={() => setGroupMode(!groupMode)}
-                          className={\`px-4 py-2 rounded-lg text-sm font-medium transition \${
-                            groupMode 
-                              ? 'bg-blue-600 text-white' 
-                              : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                          }\`}
-                        >
-                          {groupMode ? '✓ Group Mode' : 'Group Mode'}
-                        </button>
-                      </div>
-                      {groupMode && (
-                        <p className="text-slate-400 text-sm mb-4">
-                          Select multiple speakers to control them together
-                        </p>
-                      )}
+                      <h2 className="text-xl font-semibold text-white mb-4">Select a Speaker</h2>
                       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
                         {SPEAKERS.map((speaker) => (
                           <button
                             key={speaker.ip}
-                            onClick={() => toggleSpeakerSelection(speaker)}
-                            className="p-4 bg-slate-700 hover:bg-slate-600 rounded-xl transition group relative"
+                            onClick={() => selectSpeaker(speaker)}
+                            className="p-4 bg-slate-700 hover:bg-slate-600 rounded-xl transition group"
                           >
                             <svg className="mx-auto mb-2 text-blue-400 group-hover:text-blue-300" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                               <path d="M11 5L6 9H2v6h4l5 4V5z"/>
@@ -350,32 +351,6 @@ const HTML_CONTENT = `<!DOCTYPE html>
                           </button>
                         ))}
                       </div>
-                      {groupMode && selectedSpeakers.length > 0 && (
-                        <div className="mt-4 flex gap-2">
-                          <button
-                            onClick={() => {
-                              setGroupMode(false);
-                              setLoading(true);
-                              Promise.all([
-                                fetchVolume(primarySpeaker),
-                                fetchNowPlaying(primarySpeaker),
-                                fetchPresets(primarySpeaker)
-                              ]).then(() => setLoading(false));
-                            }}
-                            className="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition"
-                          >
-                            Control {selectedSpeakers.length} Speaker{selectedSpeakers.length > 1 ? 's' : ''}
-                          </button>
-                          {selectedSpeakers.length > 1 && (
-                            <button
-                              onClick={createZone}
-                              className="px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition"
-                            >
-                              Create Zone
-                            </button>
-                          )}
-                        </div>
-                      )}
                     </div>
                   ) : loading ? (
                     <div className="p-12 text-center">
@@ -384,54 +359,41 @@ const HTML_CONTENT = `<!DOCTYPE html>
                   ) : (
                     <div className="p-6 space-y-6">
                       <div className="bg-slate-700 rounded-xl p-4">
-                        <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-400">
                               <path d="M11 5L6 9H2v6h4l5 4V5z"/>
                               <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
                             </svg>
                             <div>
-                              <p className="text-white font-semibold">
-                                {selectedSpeakers.length === 1 
-                                  ? selectedSpeakers[0].name
-                                  : \`\${selectedSpeakers.length} Speakers\`}
-                              </p>
-                              {selectedSpeakers.length > 1 && (
+                              <p className="text-white font-semibold">{selectedSpeaker.name}</p>
+                              {groupedSpeakers.length > 0 && (
                                 <p className="text-slate-400 text-xs">
-                                  Primary: {primarySpeaker?.name}
+                                  + {groupedSpeakers.length} grouped speaker{groupedSpeakers.length > 1 ? 's' : ''}
                                 </p>
                               )}
                             </div>
                           </div>
-                          <button
-                            onClick={() => {
-                              setSelectedSpeakers([]);
-                              setPrimarySpeaker(null);
-                              setNowPlaying(null);
-                              setPresets([]);
-                            }}
-                            className="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-lg text-sm transition"
-                          >
-                            Change
-                          </button>
-                        </div>
-                        {selectedSpeakers.length > 1 && (
-                          <div>
-                            <div className="flex flex-wrap gap-2 mb-2">
-                              {selectedSpeakers.map(speaker => (
-                                <span key={speaker.ip} className="px-2 py-1 bg-slate-600 text-slate-200 rounded text-xs">
-                                  {speaker.name}
-                                </span>
-                              ))}
-                            </div>
+                          <div className="flex gap-2">
                             <button
-                              onClick={removeZone}
-                              className="text-xs text-red-400 hover:text-red-300"
+                              onClick={() => setShowGroupModal(true)}
+                              className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition"
                             >
-                              Remove Zone
+                              {groupedSpeakers.length > 0 ? 'Manage Group' : 'Add to Group'}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setSelectedSpeaker(null);
+                                setGroupedSpeakers([]);
+                                setNowPlaying(null);
+                                setPresets([]);
+                              }}
+                              className="px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-lg text-sm transition"
+                            >
+                              Change
                             </button>
                           </div>
-                        )}
+                        </div>
                       </div>
 
                       {nowPlaying && (
@@ -496,31 +458,136 @@ const HTML_CONTENT = `<!DOCTYPE html>
                           onChange={(e) => setVolumeLevel(parseInt(e.target.value))}
                           className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
                           style={{
-                            background: \`linear-gradient(to right, #3b82f6 0%, #3b82f6 \${volume}%, #475569 \${volume}%, #475569 100%)\`
+                            background: \\\`linear-gradient(to right, #3b82f6 0%, #3b82f6 \\\${volume}%, #475569 \\\${volume}%, #475569 100%)\\\`
                           }}
                         />
                       </div>
 
-                      {presets.length > 0 && (
-                        <div>
-                          <h3 className="text-slate-300 font-medium mb-3">Presets</h3>
-                          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                            {presets.map((preset) => (
-                              <button
-                                key={preset.id}
-                                onClick={() => selectPreset(preset.id)}
-                                className="px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-sm font-medium truncate"
-                              >
-                                {preset.name}
-                              </button>
-                            ))}
+                      <div className="grid grid-cols-2 gap-4">
+                        {presets.length > 0 && (
+                          <div>
+                            <h3 className="text-slate-300 font-medium mb-3">Presets</h3>
+                            <div className="grid grid-cols-1 gap-2">
+                              {presets.slice(0, 4).map((preset) => (
+                                <button
+                                  key={preset.id}
+                                  onClick={() => selectPreset(preset.id)}
+                                  className="px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-sm font-medium truncate text-left"
+                                >
+                                  {preset.name}
+                                </button>
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
+
+                        {sources.length > 0 && (
+                          <div>
+                            <h3 className="text-slate-300 font-medium mb-3">Sources</h3>
+                            <button
+                              onClick={() => setShowSourcesModal(true)}
+                              className="w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition text-sm font-medium"
+                            >
+                              View All Sources ({sources.length})
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
               </div>
+
+              {/* Group Modal */}
+              {showGroupModal && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                  <div className="bg-slate-800 rounded-2xl p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto border border-slate-700">
+                    <h2 className="text-2xl font-bold text-white mb-4">Group Speakers</h2>
+                    <p className="text-slate-300 mb-4">
+                      Master: <span className="text-blue-400 font-medium">{selectedSpeaker.name}</span>
+                    </p>
+                    
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+                      {SPEAKERS.filter(s => s.ip !== selectedSpeaker.ip).map((speaker) => {
+                        const isGrouped = groupedSpeakers.some(gs => gs.ip === speaker.ip);
+                        return (
+                          <button
+                            key={speaker.ip}
+                            onClick={() => toggleGroupSpeaker(speaker)}
+                            className={\\\`p-4 rounded-xl transition \\\${
+                              isGrouped 
+                                ? 'bg-blue-600 hover:bg-blue-700' 
+                                : 'bg-slate-700 hover:bg-slate-600'
+                            }\\\`}
+                          >
+                            <svg className={\\\`mx-auto mb-2 \\\${isGrouped ? 'text-white' : 'text-blue-400'}\\\`} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+                              <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                            </svg>
+                            <p className="text-white font-medium text-sm">{speaker.name}</p>
+                            {isGrouped && (
+                              <p className="text-blue-200 text-xs mt-1">✓ Selected</p>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex gap-3">
+                      {groupedSpeakers.length > 0 && (
+                        <>
+                          <button
+                            onClick={createZone}
+                            className="flex-1 px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition"
+                          >
+                            Create Zone ({groupedSpeakers.length + 1} speakers)
+                          </button>
+                          <button
+                            onClick={removeZone}
+                            className="px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition"
+                          >
+                            Remove Zone
+                          </button>
+                        </>
+                      )}
+                      <button
+                        onClick={() => setShowGroupModal(false)}
+                        className="px-4 py-3 bg-slate-600 hover:bg-slate-500 text-white rounded-lg font-medium transition"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Sources Modal */}
+              {showSourcesModal && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                  <div className="bg-slate-800 rounded-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto border border-slate-700">
+                    <h2 className="text-2xl font-bold text-white mb-4">Select Source</h2>
+                    
+                    <div className="space-y-2 mb-6">
+                      {sources.map((source, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => selectSource(source.name)}
+                          className="w-full px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-left font-medium"
+                        >
+                          {source.name}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      onClick={() => setShowSourcesModal(false)}
+                      className="w-full px-4 py-3 bg-slate-600 hover:bg-slate-500 text-white rounded-lg font-medium transition"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         }
@@ -528,4 +595,4 @@ const HTML_CONTENT = `<!DOCTYPE html>
         ReactDOM.render(<BoseSoundTouchController />, document.getElementById('root'));
     </script>
 </body>
-</html>`;
+</html>\`;
