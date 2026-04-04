@@ -173,26 +173,62 @@ const HTML_CONTENT = `<!DOCTYPE html>
           const createZone = async () => {
             if (groupedSpeakers.length === 0) return;
             
-            const masterDeviceId = await getDeviceId(selectedSpeaker);
-            if (!masterDeviceId) {
-              alert('Could not get master device ID');
-              return;
-            }
-
-            for (const speaker of groupedSpeakers) {
-              const slaveDeviceId = await getDeviceId(speaker);
-              if (!slaveDeviceId) continue;
-
-              const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
-                '<zone master="' + masterDeviceId + '">' +
-                '<member ipaddress="' + speaker.ip + '">' + slaveDeviceId + '</member>' +
-                '</zone>';
+            try {
+              const masterInfo = await sendCommand(selectedSpeaker, '/info');
+              console.log('Master info:', masterInfo);
               
-              await sendCommand(selectedSpeaker, '/setZone', 'POST', xml);
+              if (!masterInfo) {
+                alert('Could not connect to master speaker: ' + selectedSpeaker.name);
+                return;
+              }
+
+              const masterIdMatch = masterInfo.match(/<deviceID>([^<]+)<\/deviceID>/i);
+              if (!masterIdMatch) {
+                alert('Could not find device ID in master speaker response. Check console for details.');
+                console.error('Master response:', masterInfo);
+                return;
+              }
+              
+              const masterDeviceId = masterIdMatch[1];
+              console.log('Master ID:', masterDeviceId);
+
+              let successCount = 0;
+              for (const speaker of groupedSpeakers) {
+                const slaveInfo = await sendCommand(speaker, '/info');
+                if (!slaveInfo) {
+                  console.error('Could not get info from:', speaker.name);
+                  continue;
+                }
+
+                const slaveIdMatch = slaveInfo.match(/<deviceID>([^<]+)<\/deviceID>/i);
+                if (!slaveIdMatch) {
+                  console.error('Could not find device ID for:', speaker.name);
+                  continue;
+                }
+                
+                const slaveDeviceId = slaveIdMatch[1];
+                console.log('Adding to zone:', speaker.name, slaveDeviceId);
+
+                const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+                  '<zone master="' + masterDeviceId + '">' +
+                  '<member ipaddress="' + speaker.ip + '">' + slaveDeviceId + '</member>' +
+                  '</zone>';
+                
+                const result = await sendCommand(selectedSpeaker, '/setZone', 'POST', xml);
+                console.log('Zone creation result:', result);
+                successCount++;
+              }
+              
+              setShowGroupModal(false);
+              if (successCount > 0) {
+                alert('Zone created! ' + selectedSpeaker.name + ' is controlling ' + successCount + ' speaker(s).');
+              } else {
+                alert('Failed to add any speakers to the zone. Check console for details.');
+              }
+            } catch (error) {
+              console.error('Zone creation error:', error);
+              alert('Error creating zone: ' + error.message);
             }
-            
-            setShowGroupModal(false);
-            alert('Zone created! ' + selectedSpeaker.name + ' is the master.');
           };
 
           const removeZone = async () => {
