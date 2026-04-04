@@ -117,21 +117,41 @@ const HTML_CONTENT = `<!DOCTYPE html>
           const [volume, setVolume] = useState(50);
           const [nowPlaying, setNowPlaying] = useState(null);
           const [presets, setPresets] = useState([]);
-          const [sources, setSources] = useState([]);
           const [loading, setLoading] = useState(false);
           const [showGroupModal, setShowGroupModal] = useState(false);
-          const [showSourcesModal, setShowSourcesModal] = useState(false);
+          const [showMediaModal, setShowMediaModal] = useState(false);
+          const [mediaItems, setMediaItems] = useState([]);
+          const [currentMediaPath, setCurrentMediaPath] = useState('');
+          const [lastApiCall, setLastApiCall] = useState(null);
 
           const sendCommand = async (speaker, endpoint, method = 'GET', body = null) => {
             try {
-              const response = await fetch('/api/' + speaker.ip + endpoint, {
+              const url = '/api/' + speaker.ip + endpoint;
+              const response = await fetch(url, {
                 method,
                 headers: body ? { 'Content-Type': 'application/xml' } : {},
                 body
               });
-              return await response.text();
+              const responseText = await response.text();
+              
+              setLastApiCall({
+                url: 'http://' + speaker.ip + ':8090' + endpoint,
+                method: method,
+                body: body || '(none)',
+                response: responseText,
+                timestamp: new Date().toLocaleTimeString()
+              });
+              
+              return responseText;
             } catch (error) {
               console.error('Error:', error.message);
+              setLastApiCall({
+                url: 'http://' + speaker.ip + ':8090' + endpoint,
+                method: method,
+                body: body || '(none)',
+                response: 'ERROR: ' + error.message,
+                timestamp: new Date().toLocaleTimeString()
+              });
               return null;
             }
           };
