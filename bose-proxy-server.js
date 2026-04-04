@@ -3,7 +3,8 @@
 // Then open: http://localhost:3000
 
 const http = require('http');
-const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = 3000;
 
@@ -23,14 +24,14 @@ const server = http.createServer((req, res) => {
   // Serve the HTML page
   if (req.url === '/' || req.url === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(HTML_CONTENT);
+    res.end(getHTMLContent());
     return;
   }
 
   // Proxy API requests
   if (req.url.startsWith('/api/')) {
     const parts = req.url.split('/');
-    const ip = parts[2]; // Extract IP from /api/192.168.1.229/volume
+    const ip = parts[2];
     const endpoint = '/' + parts.slice(3).join('/');
     
     let body = '';
@@ -81,7 +82,8 @@ server.listen(PORT, () => {
   console.log(`Open your browser to http://localhost:${PORT}\n`);
 });
 
-const HTML_CONTENT = `<!DOCTYPE html>
+function getHTMLContent() {
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -201,7 +203,9 @@ const HTML_CONTENT = `<!DOCTYPE html>
                 return;
               }
 
-              const masterIdMatch = masterInfo.match(/<deviceID>([^<]+)<\/deviceID>/i);
+              const deviceIdRegex = new RegExp('<deviceID>([^<]+)</deviceID>', 'i');
+              const masterIdMatch = masterInfo.match(deviceIdRegex);
+              
               if (!masterIdMatch) {
                 alert('Could not find device ID in master speaker response. Check console for details.');
                 console.error('Master response:', masterInfo);
@@ -219,7 +223,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
                   continue;
                 }
 
-                const slaveIdMatch = slaveInfo.match(/<deviceID>([^<]+)<\/deviceID>/i);
+                const slaveIdMatch = slaveInfo.match(deviceIdRegex);
                 if (!slaveIdMatch) {
                   console.error('Could not find device ID for:', speaker.name);
                   continue;
@@ -262,19 +266,12 @@ const HTML_CONTENT = `<!DOCTYPE html>
             alert('Zone removed!');
           };
 
-          const getDeviceId = async (speaker) => {
-            const response = await sendCommand(speaker, '/info');
-            if (!response) return null;
-            
-            const match = response.match(/<deviceID>([^<]+)<\/deviceID>/);
-            return match ? match[1] : null;
-          };
-
           const fetchVolume = async (speaker = selectedSpeaker) => {
             if (!speaker) return;
             const response = await sendCommand(speaker, '/volume');
             if (response) {
-              const match = response.match(/<actualvolume>(\d+)<\/actualvolume>/);
+              const volumeRegex = new RegExp('<actualvolume>(\\\\d+)</actualvolume>');
+              const match = response.match(volumeRegex);
               if (match) setVolume(parseInt(match[1]));
             }
           };
@@ -549,21 +546,46 @@ const HTML_CONTENT = `<!DOCTYPE html>
                           </div>
                         )}
 
-                        {sources.length > 0 && (
-                          <div>
-                            <h3 className="text-slate-300 font-medium mb-3">Sources</h3>
-                            <button
-                              onClick={() => setShowSourcesModal(true)}
-                              className="w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition text-sm font-medium"
-                            >
-                              View All Sources ({sources.length})
-                            </button>
-                          </div>
-                        )}
+                        <div>
+                          <h3 className="text-slate-300 font-medium mb-3">Stored Music</h3>
+                          <button
+                            onClick={() => {
+                              setShowMediaModal(true);
+                              browseMedia('');
+                            }}
+                            className="w-full px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition text-sm font-medium"
+                          >
+                            Browse Library
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
                 </div>
+
+                {lastApiCall && (
+                  <div className="mt-4 bg-slate-900 rounded-xl p-4 border border-slate-700">
+                    <h3 className="text-slate-300 font-medium mb-2 text-sm">Last API Call ({lastApiCall.timestamp})</h3>
+                    <div className="space-y-2 text-xs font-mono">
+                      <div>
+                        <span className="text-slate-400">Method:</span>
+                        <span className="text-blue-400 ml-2">{lastApiCall.method}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">URL:</span>
+                        <span className="text-green-400 ml-2 break-all">{lastApiCall.url}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Body:</span>
+                        <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto">{lastApiCall.body}</pre>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Response:</span>
+                        <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">{lastApiCall.response}</pre>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {showGroupModal && (
@@ -624,25 +646,53 @@ const HTML_CONTENT = `<!DOCTYPE html>
                 </div>
               )}
 
-              {showSourcesModal && (
+              {showMediaModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                  <div className="bg-slate-800 rounded-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto border border-slate-700">
-                    <h2 className="text-2xl font-bold text-white mb-4">Select Source</h2>
-                    
-                    <div className="space-y-2 mb-6">
-                      {sources.map((source, idx) => (
+                  <div className="bg-slate-800 rounded-2xl p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto border border-slate-700">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-2xl font-bold text-white">Music Library</h2>
+                      {currentMediaPath && (
                         <button
-                          key={idx}
-                          onClick={() => selectSource(source.name)}
-                          className="w-full px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-left font-medium"
+                          onClick={() => browseMedia('')}
+                          className="px-3 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm"
                         >
-                          {source.name}
+                          ← Back to Root
                         </button>
-                      ))}
+                      )}
+                    </div>
+                    
+                    {currentMediaPath && (
+                      <p className="text-slate-400 text-sm mb-4">Path: {currentMediaPath || '/'}</p>
+                    )}
+
+                    <div className="space-y-2 mb-6">
+                      {mediaItems.length === 0 ? (
+                        <p className="text-slate-400 text-center py-8">No items found or loading...</p>
+                      ) : (
+                        mediaItems.map((item, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => navigateMedia(item)}
+                            className="w-full px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition text-left flex items-center gap-2"
+                          >
+                            {item.type === 'dir' ? (
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                              </svg>
+                            ) : (
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <polygon points="10 8 16 12 10 16 10 8"/>
+                              </svg>
+                            )}
+                            <span className="font-medium">{item.name}</span>
+                          </button>
+                        ))
+                      )}
                     </div>
 
                     <button
-                      onClick={() => setShowSourcesModal(false)}
+                      onClick={() => setShowMediaModal(false)}
                       className="w-full px-4 py-3 bg-slate-600 hover:bg-slate-500 text-white rounded-lg font-medium transition"
                     >
                       Close
@@ -658,3 +708,4 @@ const HTML_CONTENT = `<!DOCTYPE html>
     </script>
 </body>
 </html>`;
+}
