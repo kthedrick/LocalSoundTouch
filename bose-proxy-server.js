@@ -77,11 +77,11 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(\`\\n🎵 Bose SoundTouch Controller running at http://localhost:\${PORT}\`);
-  console.log(\`Open your browser to http://localhost:\${PORT}\\n\`);
+  console.log(`\n🎵 Bose SoundTouch Controller running at http://localhost:${PORT}`);
+  console.log(`Open your browser to http://localhost:${PORT}\n`);
 });
 
-const HTML_CONTENT = \`<!DOCTYPE html>
+const HTML_CONTENT = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -124,7 +124,7 @@ const HTML_CONTENT = \`<!DOCTYPE html>
 
           const sendCommand = async (speaker, endpoint, method = 'GET', body = null) => {
             try {
-              const response = await fetch(\\\`/api/\\\${speaker.ip}\\\${endpoint}\\\`, {
+              const response = await fetch('/api/' + speaker.ip + endpoint, {
                 method,
                 headers: body ? { 'Content-Type': 'application/xml' } : {},
                 body
@@ -183,20 +183,20 @@ const HTML_CONTENT = \`<!DOCTYPE html>
               const slaveDeviceId = await getDeviceId(speaker);
               if (!slaveDeviceId) continue;
 
-              const xml = \\\`<?xml version="1.0" encoding="UTF-8"?>
-<zone master="\\\${masterDeviceId}">
-  <member ipaddress="\\\${speaker.ip}">\\\${slaveDeviceId}</member>
-</zone>\\\`;
+              const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+                '<zone master="' + masterDeviceId + '">' +
+                '<member ipaddress="' + speaker.ip + '">' + slaveDeviceId + '</member>' +
+                '</zone>';
               
               await sendCommand(selectedSpeaker, '/setZone', 'POST', xml);
             }
             
             setShowGroupModal(false);
-            alert(\\\`Zone created! \\\${selectedSpeaker.name} is the master.\\\`);
+            alert('Zone created! ' + selectedSpeaker.name + ' is the master.');
           };
 
           const removeZone = async () => {
-            const xml = \\\`<?xml version="1.0" encoding="UTF-8"?><zone />\\\`;
+            const xml = '<?xml version="1.0" encoding="UTF-8"?><zone />';
             await sendCommand(selectedSpeaker, '/removeZone', 'POST', xml);
             
             for (const speaker of groupedSpeakers) {
@@ -211,7 +211,7 @@ const HTML_CONTENT = \`<!DOCTYPE html>
             const response = await sendCommand(speaker, '/info');
             if (!response) return null;
             
-            const match = response.match(/<deviceID>(.*?)<\\\\/deviceID>/);
+            const match = response.match(/<deviceID>(.*?)<\\/deviceID>/);
             return match ? match[1] : null;
           };
 
@@ -219,7 +219,7 @@ const HTML_CONTENT = \`<!DOCTYPE html>
             if (!speaker) return;
             const response = await sendCommand(speaker, '/volume');
             if (response) {
-              const match = response.match(/<actualvolume>(\\\\d+)<\\\\/actualvolume>/);
+              const match = response.match(/<actualvolume>(\\d+)<\\/actualvolume>/);
               if (match) setVolume(parseInt(match[1]));
             }
           };
@@ -256,10 +256,10 @@ const HTML_CONTENT = \`<!DOCTYPE html>
                 
                 return {
                   id: id,
-                  name: itemName || \\\`Preset \\\${id}\\\`,
+                  name: itemName || 'Preset ' + id,
                   source: source || ''
                 };
-              }).filter(p => p.name && p.name !== \\\`Preset \\\${p.id}\\\`);
+              }).filter(p => p.name && p.name !== 'Preset ' + p.id);
               
               setPresets(presetList);
             }
@@ -284,33 +284,33 @@ const HTML_CONTENT = \`<!DOCTYPE html>
           };
 
           const selectSource = async (sourceName) => {
-            const xml = \\\`<ContentItem source="\\\${sourceName}" sourceAccount=""><itemName>\\\${sourceName}</itemName></ContentItem>\\\`;
+            const xml = '<ContentItem source="' + sourceName + '" sourceAccount=""><itemName>' + sourceName + '</itemName></ContentItem>';
             await sendGroupCommand('/select', 'POST', xml);
             setShowSourcesModal(false);
             setTimeout(() => fetchNowPlaying(), 1000);
           };
 
           const setVolumeLevel = async (level) => {
-            const xml = \\\`<volume>\\\${level}</volume>\\\`;
+            const xml = '<volume>' + level + '</volume>';
             await sendGroupCommand('/volume', 'POST', xml);
             setVolume(level);
           };
 
           const pressKey = async (key) => {
-            const xml = \\\`<key state="press" sender="Gabbo">\\\${key}</key>\\\`;
+            const xml = '<key state="press" sender="Gabbo">' + key + '</key>';
             await sendGroupCommand('/key', 'POST', xml);
             
-            const releaseXml = \\\`<key state="release" sender="Gabbo">\\\${key}</key>\\\`;
+            const releaseXml = '<key state="release" sender="Gabbo">' + key + '</key>';
             setTimeout(() => sendGroupCommand('/key', 'POST', releaseXml), 100);
             
             setTimeout(() => fetchNowPlaying(), 500);
           };
 
           const selectPreset = async (presetId) => {
-            const xml = \\\`<key state="press" sender="Gabbo">PRESET_\\\${presetId}</key>\\\`;
+            const xml = '<key state="press" sender="Gabbo">PRESET_' + presetId + '</key>';
             await sendGroupCommand('/key', 'POST', xml);
             
-            const releaseXml = \\\`<key state="release" sender="Gabbo">PRESET_\\\${presetId}</key>\\\`;
+            const releaseXml = '<key state="release" sender="Gabbo">PRESET_' + presetId + '</key>';
             setTimeout(() => sendGroupCommand('/key', 'POST', releaseXml), 100);
             
             setTimeout(() => fetchNowPlaying(), 1000);
@@ -458,7 +458,7 @@ const HTML_CONTENT = \`<!DOCTYPE html>
                           onChange={(e) => setVolumeLevel(parseInt(e.target.value))}
                           className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
                           style={{
-                            background: \\\`linear-gradient(to right, #3b82f6 0%, #3b82f6 \\\${volume}%, #475569 \\\${volume}%, #475569 100%)\\\`
+                            background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 ' + volume + '%, #475569 ' + volume + '%, #475569 100%)'
                           }}
                         />
                       </div>
@@ -498,7 +498,6 @@ const HTML_CONTENT = \`<!DOCTYPE html>
                 </div>
               </div>
 
-              {/* Group Modal */}
               {showGroupModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
                   <div className="bg-slate-800 rounded-2xl p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto border border-slate-700">
@@ -514,13 +513,9 @@ const HTML_CONTENT = \`<!DOCTYPE html>
                           <button
                             key={speaker.ip}
                             onClick={() => toggleGroupSpeaker(speaker)}
-                            className={\\\`p-4 rounded-xl transition \\\${
-                              isGrouped 
-                                ? 'bg-blue-600 hover:bg-blue-700' 
-                                : 'bg-slate-700 hover:bg-slate-600'
-                            }\\\`}
+                            className={'p-4 rounded-xl transition ' + (isGrouped ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-700 hover:bg-slate-600')}
                           >
-                            <svg className={\\\`mx-auto mb-2 \\\${isGrouped ? 'text-white' : 'text-blue-400'}\\\`} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <svg className={'mx-auto mb-2 ' + (isGrouped ? 'text-white' : 'text-blue-400')} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                               <path d="M11 5L6 9H2v6h4l5 4V5z"/>
                               <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
                             </svg>
@@ -561,7 +556,6 @@ const HTML_CONTENT = \`<!DOCTYPE html>
                 </div>
               )}
 
-              {/* Sources Modal */}
               {showSourcesModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
                   <div className="bg-slate-800 rounded-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto border border-slate-700">
@@ -595,4 +589,4 @@ const HTML_CONTENT = \`<!DOCTYPE html>
         ReactDOM.render(<BoseSoundTouchController />, document.getElementById('root'));
     </script>
 </body>
-</html>\`;
+</html>`;
