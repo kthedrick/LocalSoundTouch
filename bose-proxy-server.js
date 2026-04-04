@@ -125,6 +125,7 @@ function getHTMLContent() {
           const [mediaItems, setMediaItems] = useState([]);
           const [currentMediaPath, setCurrentMediaPath] = useState('');
           const [lastApiCall, setLastApiCall] = useState(null);
+          const [apiCallHistory, setApiCallHistory] = useState([]);
 
           const sendCommand = async (speaker, endpoint, method = 'GET', body = null) => {
             try {
@@ -136,24 +137,29 @@ function getHTMLContent() {
               });
               const responseText = await response.text();
               
-              setLastApiCall({
+              const callInfo = {
                 url: 'http://' + speaker.ip + ':8090' + endpoint,
                 method: method,
                 body: body || '(none)',
                 response: responseText,
                 timestamp: new Date().toLocaleTimeString()
-              });
+              };
+              
+              setLastApiCall(callInfo);
+              setApiCallHistory(prev => [callInfo, ...prev].slice(0, 2));
               
               return responseText;
             } catch (error) {
               console.error('Error:', error.message);
-              setLastApiCall({
+              const errorInfo = {
                 url: 'http://' + speaker.ip + ':8090' + endpoint,
                 method: method,
                 body: body || '(none)',
                 response: 'ERROR: ' + error.message,
                 timestamp: new Date().toLocaleTimeString()
-              });
+              };
+              setLastApiCall(errorInfo);
+              setApiCallHistory(prev => [errorInfo, ...prev].slice(0, 2));
               return null;
             }
           };
@@ -565,27 +571,32 @@ function getHTMLContent() {
                   )}
                 </div>
 
-                {lastApiCall && (
+                {apiCallHistory.length > 0 && (
                   <div className="mt-4 bg-slate-900 rounded-xl p-4 border border-slate-700">
-                    <h3 className="text-slate-300 font-medium mb-2 text-sm">Last API Call ({lastApiCall.timestamp})</h3>
-                    <div className="space-y-2 text-xs font-mono">
-                      <div>
-                        <span className="text-slate-400">Method:</span>
-                        <span className="text-blue-400 ml-2">{lastApiCall.method}</span>
+                    <h3 className="text-slate-300 font-medium mb-3 text-sm">Last 2 API Calls</h3>
+                    {apiCallHistory.map((call, idx) => (
+                      <div key={idx} className={idx > 0 ? 'mt-4 pt-4 border-t border-slate-700' : ''}>
+                        <h4 className="text-slate-400 text-xs mb-2">Call #{idx + 1} ({call.timestamp})</h4>
+                        <div className="space-y-2 text-xs font-mono">
+                          <div>
+                            <span className="text-slate-400">Method:</span>
+                            <span className="text-blue-400 ml-2">{call.method}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">URL:</span>
+                            <span className="text-green-400 ml-2 break-all">{call.url}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">Body:</span>
+                            <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto">{call.body}</pre>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">Response:</span>
+                            <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">{call.response}</pre>
+                          </div>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-slate-400">URL:</span>
-                        <span className="text-green-400 ml-2 break-all">{lastApiCall.url}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Body:</span>
-                        <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto">{lastApiCall.body}</pre>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Response:</span>
-                        <pre className="text-slate-300 ml-2 mt-1 bg-slate-800 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">{lastApiCall.response}</pre>
-                      </div>
-                    </div>
+                    ))}
                   </div>
                 )}
               </div>
