@@ -320,7 +320,7 @@ function getHTMLContent() {
           const browseMedia = async (location = '') => {
             if (!selectedSpeaker) return;
             
-            const xml = '<ContentItem source="STORED_MUSIC" type="dir" location="' + location + '" sourceAccount=""><itemName>Music Library</itemName></ContentItem>';
+            const xml = '<ContentItem source="STORED_MUSIC" type="dir" location="' + location + '" sourceAccount="4d696e69-444c-164e-9d41-c46e1faa21b9/0"><itemName>Music Library</itemName></ContentItem>';
             const response = await sendCommand(selectedSpeaker, '/browse', 'POST', xml);
             
             if (response) {
@@ -332,7 +332,8 @@ function getHTMLContent() {
                 name: item.querySelector('itemName')?.textContent || 'Unknown',
                 type: item.getAttribute('type'),
                 location: item.getAttribute('location') || '',
-                source: item.getAttribute('source')
+                source: item.getAttribute('source'),
+                sourceAccount: item.getAttribute('sourceAccount') || ''
               }));
               
               setMediaItems(mediaList);
@@ -341,7 +342,8 @@ function getHTMLContent() {
           };
 
           const playMedia = async (item) => {
-            const xml = '<ContentItem source="' + item.source + '" type="' + item.type + '" location="' + item.location + '" sourceAccount=""><itemName>' + item.name + '</itemName></ContentItem>';
+            const sourceAccount = item.sourceAccount || '4d696e69-444c-164e-9d41-c46e1faa21b9/0';
+            const xml = '<ContentItem source="' + item.source + '" type="' + item.type + '" location="' + item.location + '" sourceAccount="' + sourceAccount + '"><itemName>' + item.name + '</itemName></ContentItem>';
             await sendGroupCommand('/select', 'POST', xml);
             setShowMediaModal(false);
             setTimeout(() => fetchNowPlaying(), 1000);
