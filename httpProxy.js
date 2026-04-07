@@ -2,6 +2,9 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const speakerDiscovery = require('./speakerDiscovery');
+const handleNas = require('./nasHandler');
+const upnpModule = require('./upnpHandler');
+const handleUpnp = upnpModule.handle;
 
 const publicDir = path.join(__dirname, 'public');
 
@@ -12,17 +15,35 @@ const MIME_TYPES = {
   '.css':  'text/css',
 };
 
-module.exports = function handleRequest(req, res) {
+let _baseSet = false;
+module.exports = function handleRequest(req, res, serverBase) {
+  if (!_baseSet && serverBase) { upnpModule.setServerBase(serverBase); _baseSet = true; }
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
+  if (req.url === '/serverInfo') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ base: serverBase }));
+    return;
+  }
+
   if (req.url === '/speakers') {
     const speakers = speakerDiscovery.getSpeakers();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(speakers));
+    return;
+  }
+
+  if (req.url.startsWith('/nas/')) {
+    handleNas(req, res, serverBase);
+    return;
+  }
+
+  if (req.url.startsWith('/upnp/')) {
+    handleUpnp(req, res);
     return;
   }
 
@@ -56,7 +77,6 @@ module.exports = function handleRequest(req, res) {
   const urlPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
   const filePath = path.join(publicDir, urlPath);
 
-  // Security: keep requests inside publicDir
   if (!filePath.startsWith(publicDir + path.sep) && filePath !== publicDir) {
     res.writeHead(403); res.end('Forbidden'); return;
   }
