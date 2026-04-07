@@ -26,6 +26,17 @@ Pandora requires official developer partnership for direct integration — not w
 ### Apple Music
 Explore after Pandora/HA integration is solid. Likely same HA-as-intermediary approach.
 
+### HA Playback Handoff ("Release to TV")
+Problem: HA is overly aggressive about restarting playback after a glitch or source change. When wife switches soundbar to TV input, HA sees "playback stopped unexpectedly" and takes over again.
+
+Solution: this app sends an explicit stop to HA's media player entity when the user intentionally stops or changes source, so HA knows it was deliberate and doesn't restart.
+
+Implementation:
+- Small `haClient.js` module with HA local URL + long-lived access token (stored in config, git-ignored)
+- `/ha/stop` endpoint that POSTs to HA REST API: `media_player.media_stop` or `media_player.clear_playlist` for the relevant entity
+- "Release to TV" button (or integrate into existing stop) that clears both our UPnP queue and HA's state
+- HA REST API is simple: POST to `http://homeassistant.local:8123/api/services/media_player/media_stop` with Bearer token and `{ entity_id: "..." }` body
+
 ### Server-side WebSocket Queue (Polish)
 Replace 3s `GetTransportInfo` polling for queue advancement with a WebSocket subscription to `ws://<speakerIp>:8080`. Speaker pushes `nowPlayingUpdated` events — when `playStatus` hits `STOP_STATE` with source=UPnP, advance the queue immediately. Requires implementing WebSocket client handshake in Node.js `net` module (~50 lines, no npm).
 
