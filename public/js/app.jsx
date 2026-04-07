@@ -1,142 +1,4 @@
-// Run with: node bose-proxy-server.js
-// Open: http://localhost:3000
-
-const http = require('http');
-const net = require('net');
-
-const PORT = 3000;
-
-const server = http.createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
-
-  if (req.url === '/' || req.url === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(getHTMLContent());
-    return;
-  }
-
-  if (req.url.startsWith('/api/')) {
-    const parts = req.url.split('/');
-    const ip = parts[2];
-    const endpoint = '/' + parts.slice(3).join('/');
-    let body = '';
-    req.on('data', chunk => { body += chunk.toString(); });
-    req.on('end', () => {
-      const options = {
-        hostname: ip, port: 8090, path: endpoint, method: req.method,
-        headers: body ? { 'Content-Type': 'application/xml' } : {}
-      };
-      const proxyReq = http.request(options, (proxyRes) => {
-        let data = '';
-        proxyRes.on('data', chunk => { data += chunk; });
-        proxyRes.on('end', () => {
-          res.writeHead(proxyRes.statusCode, { 'Content-Type': 'text/xml' });
-          res.end(data);
-        });
-      });
-      proxyReq.on('error', err => { res.writeHead(500); res.end('Proxy error: ' + err.message); });
-      if (body) proxyReq.write(body);
-      proxyReq.end();
-    });
-    return;
-  }
-
-  res.writeHead(404);
-  res.end('Not found');
-});
-
-// WebSocket proxy: /ws/<ip> -> ws://<ip>:8080 with protocol "gabbo"
-server.on('upgrade', (req, socket, head) => {
-  const parts = req.url.split('/');
-  if (parts[1] !== 'ws' || !parts[2]) { socket.destroy(); return; }
-  const ip = parts[2];
-  const target = net.createConnection({ host: ip, port: 8080 });
-  target.on('connect', () => {
-    const upgradeRequest = [
-      'GET /WebSocket HTTP/1.1',
-      'Host: ' + ip + ':8080',
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      'Sec-WebSocket-Key: ' + (req.headers['sec-websocket-key'] || 'dGhlIHNhbXBsZSBub25jZQ=='),
-      'Sec-WebSocket-Version: ' + (req.headers['sec-websocket-version'] || '13'),
-      'Sec-WebSocket-Protocol: gabbo',
-      '', ''
-    ].join('\r\n');
-    target.write(upgradeRequest);
-    if (head && head.length) target.write(head);
-    target.pipe(socket);
-    socket.pipe(target);
-  });
-  target.on('error', err => { console.error('WS proxy error:', err.message); socket.end(); });
-  socket.on('error', () => target.destroy());
-  socket.on('close', () => target.destroy());
-});
-
-server.listen(PORT, () => {
-  console.log('\n🎵 SoundTouch Controller running at http://localhost:' + PORT);
-  console.log('Open your browser to http://localhost:' + PORT + '\n');
-});
-
-function getHTMLContent() {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SoundTouch Controller</title>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body>
-    <div id="root"></div>
-    <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
-
-        const SPEAKERS = [
-          { ip: '192.168.1.229', name: 'Sunroom' },
-          { ip: '192.168.1.164', name: 'Office' },
-          { ip: '192.168.1.247', name: 'Bathroom' },
-          { ip: '192.168.1.36', name: 'Rosemary' },
-          { ip: '192.168.1.94', name: 'Joshua' },
-          { ip: '192.168.1.171', name: 'Living Room' },
-          { ip: '192.168.1.185', name: 'Kitchen' },
-          { ip: '192.168.1.176', name: 'Main Bedroom' },
-          { ip: '192.168.1.62', name: 'Dining Room' },
-          { ip: '192.168.1.13', name: 'Patio' }
-        ];
-
-        const REPEAT_CYCLE = ['REPEAT_OFF', 'REPEAT_ONE', 'REPEAT_ALL'];
-
-        // ── Icons ────────────────────────────────────────────────────────────────
-        const Icon = ({ d, children, size = 20, ...props }) => (
-          <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-               strokeLinejoin="round" {...props}>
-            {d ? <path d={d}/> : children}
-          </svg>
-        );
-
-        const SpeakerIcon = () => <Icon><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></Icon>;
-        const PlayIcon = () => <Icon><polygon points="5 3 19 12 5 21 5 3"/></Icon>;
-        const PauseIcon = () => <Icon><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></Icon>;
-        const PrevIcon = () => <Icon><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></Icon>;
-        const NextIcon = () => <Icon><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></Icon>;
-        const PowerIcon = () => <Icon><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></Icon>;
-        const VolumeIcon = () => <Icon><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></Icon>;
-        const MuteIcon = () => <Icon><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></Icon>;
-        const ShuffleIcon = () => <Icon><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></Icon>;
-        const RepeatIcon = () => <Icon><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></Icon>;
-        const SourceIcon = () => <Icon><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/></Icon>;
-        const BassIcon = () => <Icon><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></Icon>;
-
-        // ── App ──────────────────────────────────────────────────────────────────
-        function BoseSoundTouchController() {
+function BoseSoundTouchController() {
           const [selectedSpeaker, setSelectedSpeaker] = useState(null);
           const [groupedSpeakers, setGroupedSpeakers] = useState([]);
           const [volume, setVolume] = useState(50);
@@ -146,6 +8,7 @@ function getHTMLContent() {
           const [presets, setPresets] = useState([]);
           const [loading, setLoading] = useState(false);
           const [showGroupModal, setShowGroupModal] = useState(false);
+          const [zoneError, setZoneError] = useState(null);
           const [showSourcesModal, setShowSourcesModal] = useState(false);
           const [showDebug, setShowDebug] = useState(false);
           const [apiCallHistory, setApiCallHistory] = useState([]);
@@ -155,13 +18,16 @@ function getHTMLContent() {
           const [repeatMode, setRepeatMode] = useState('REPEAT_OFF');
           const [sources, setSources] = useState([]);
           const [wsConnected, setWsConnected] = useState(false);
+          const [trackPosition, setTrackPosition] = useState(0);
           const wsRef = useRef(null);
           const wsReconnectTimer = useRef(null);
           const volumeDebounceTimer = useRef(null);
           const bassDebounceTimer = useRef(null);
+          const positionTimerRef = useRef(null);
           const [zoneVolumes, setZoneVolumes] = useState({});
           const zoneVolumeTimers = useRef({});
           const [zoneMasterIp, setZoneMasterIp] = useState(null);
+          const [deviceIds, setDeviceIds] = useState({});
 
           // ── Core API ───────────────────────────────────────────────────────────
           const sendCommand = async (speaker, endpoint, method = 'GET', body = null) => {
@@ -213,6 +79,7 @@ function getHTMLContent() {
             const xml = new DOMParser().parseFromString(res, 'text/xml');
             const npEl = xml.querySelector('nowPlaying');
             setPlayStatus(xml.querySelector('playStatus')?.textContent || null);
+            setTrackPosition(parseInt(xml.querySelector('time')?.textContent || '0'));
             setNowPlaying({
               artist: xml.querySelector('artist')?.textContent || '',
               track: xml.querySelector('track')?.textContent || '',
@@ -222,7 +89,8 @@ function getHTMLContent() {
               stationName: xml.querySelector('stationName')?.textContent ||
                            xml.querySelector('ContentItem itemName')?.textContent || '',
               art: xml.querySelector('art')?.textContent || '',
-              description: xml.querySelector('description')?.textContent || ''
+              description: xml.querySelector('description')?.textContent || '',
+              duration: parseInt(xml.querySelector('time')?.getAttribute('total') || '0'),
             });
           };
 
@@ -300,6 +168,18 @@ function getHTMLContent() {
             }, 250);
           };
 
+          const removeFromZone = async (spk) => {
+            const masterDeviceId = await getDeviceId(selectedSpeaker);
+            const slaveDeviceId = await getDeviceId(spk);
+            if (!masterDeviceId || !slaveDeviceId) return;
+            const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+              '<zone master="' + masterDeviceId + '">' +
+              '<member ipaddress="' + spk.ip + '">' + slaveDeviceId + '</member>' +
+              '</zone>';
+            await sendCommand(selectedSpeaker, '/removeZoneSlave', 'POST', xml);
+            setGroupedSpeakers(prev => prev.filter(s => s.ip !== spk.ip));
+          };
+
           const detectAndRestoreZone = async (speaker) => {
             const res = await sendCommand(speaker, '/getZone');
             if (!res) return;
@@ -316,6 +196,16 @@ function getHTMLContent() {
             const otherIps = allZoneIps.filter(ip => ip !== speaker.ip);
             const otherSpeakers = otherIps.map(ip => SPEAKERS.find(s => s.ip === ip)).filter(Boolean);
             if (otherSpeakers.length === 0) return;
+            // Cache device IDs from the zone response — avoids needing /info calls later
+            const cached = {};
+            const masterId = zoneEl.getAttribute('master');
+            if (masterId && masterIp) cached[masterIp] = masterId;
+            memberEls.forEach(m => {
+              const ip = m.getAttribute('ipaddress');
+              const id = m.textContent.trim();
+              if (ip && id) cached[ip] = id;
+            });
+            setDeviceIds(prev => ({ ...prev, ...cached }));
             // Track who the master is (null = selectedSpeaker is the master)
             const isMaster = !masterIp || masterIp === speaker.ip;
             setZoneMasterIp(isMaster ? null : masterIp);
@@ -466,82 +356,46 @@ function getHTMLContent() {
 
           // ── Zone management ────────────────────────────────────────────────────
           const getDeviceId = async (speaker) => {
+            if (deviceIds[speaker.ip]) return deviceIds[speaker.ip];
             const res = await sendCommand(speaker, '/info');
             if (!res) return null;
             const xml = new DOMParser().parseFromString(res, 'text/xml');
-            return xml.querySelector('info')?.getAttribute('deviceID') || null;
+            const id = xml.querySelector('info')?.getAttribute('deviceID') || null;
+            if (id) setDeviceIds(prev => ({ ...prev, [speaker.ip]: id }));
+            return id;
           };
 
-          const createZone = async () => {
-            if (groupedSpeakers.length === 0) return;
-            try {
-              const masterDeviceId = await getDeviceId(selectedSpeaker);
-              if (!masterDeviceId) { alert('Could not connect to ' + selectedSpeaker.name); return; }
-
-              const slaveData = (await Promise.all(
-                groupedSpeakers.map(async s => {
-                  const id = await getDeviceId(s);
-                  return id ? { speaker: s, deviceId: id } : null;
-                })
-              )).filter(Boolean);
-
-              if (slaveData.length === 0) { alert('Could not reach any grouped speakers'); return; }
-
-              const membersXml = slaveData.map(s =>
-                '<member ipaddress="' + s.speaker.ip + '">' + s.deviceId + '</member>'
-              ).join('');
-
-              const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
-                '<zone master="' + masterDeviceId + '" senderIPAddress="' + selectedSpeaker.ip + '">' +
-                membersXml + '</zone>';
-
-              await sendCommand(selectedSpeaker, '/setZone', 'POST', xml);
-              setShowGroupModal(false);
-              alert('Zone created: ' + selectedSpeaker.name + ' + ' + slaveData.length + ' speaker(s).');
-            } catch (err) {
-              alert('Zone error: ' + err.message);
-            }
-          };
-
-          const addSpeakerToZone = async (speaker) => {
-            try {
-              const masterDeviceId = await getDeviceId(selectedSpeaker);
-              const slaveDeviceId = await getDeviceId(speaker);
-              if (!masterDeviceId || !slaveDeviceId) { alert('Could not reach speaker'); return; }
-              const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
-                '<zone master="' + masterDeviceId + '">' +
-                '<member ipaddress="' + speaker.ip + '">' + slaveDeviceId + '</member>' +
-                '</zone>';
-              await sendCommand(selectedSpeaker, '/addZoneSlave', 'POST', xml);
-              setGroupedSpeakers(prev => [...prev, speaker]);
-            } catch (err) {
-              alert('Add to zone error: ' + err.message);
-            }
-          };
-
-          const removeSpeakerFromZone = async (speaker) => {
-            try {
-              const masterDeviceId = await getDeviceId(selectedSpeaker);
-              const slaveDeviceId = await getDeviceId(speaker);
-              if (!masterDeviceId || !slaveDeviceId) { alert('Could not reach speaker'); return; }
-              const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
-                '<zone master="' + masterDeviceId + '">' +
-                '<member ipaddress="' + speaker.ip + '">' + slaveDeviceId + '</member>' +
-                '</zone>';
-              await sendCommand(selectedSpeaker, '/removeZoneSlave', 'POST', xml);
-              setGroupedSpeakers(prev => prev.filter(s => s.ip !== speaker.ip));
-            } catch (err) {
-              alert('Remove from zone error: ' + err.message);
-            }
-          };
-
-          const removeZone = async () => {
+          const applyZone = async () => {
+            setZoneError(null);
             const masterDeviceId = await getDeviceId(selectedSpeaker);
-            if (!masterDeviceId) return;
-            const xml = '<?xml version="1.0" encoding="UTF-8"?><zone master="' + masterDeviceId + '"/>';
-            await sendCommand(selectedSpeaker, '/removeZoneSlave', 'POST', xml);
-            setGroupedSpeakers([]);
-            alert('Zone removed.');
+            if (!masterDeviceId) {
+              setZoneError('Could not reach ' + selectedSpeaker.name);
+              return;
+            }
+            if (groupedSpeakers.length === 0) {
+              const xml = '<?xml version="1.0" encoding="UTF-8"?><zone master="' + masterDeviceId + '"/>';
+              await sendCommand(selectedSpeaker, '/removeZoneSlave', 'POST', xml);
+              setShowGroupModal(false);
+              return;
+            }
+            const slaveData = (await Promise.all(
+              groupedSpeakers.map(async s => {
+                const id = await getDeviceId(s);
+                return id ? { speaker: s, deviceId: id } : null;
+              })
+            )).filter(Boolean);
+            if (slaveData.length === 0) {
+              setZoneError('Could not reach any selected speakers — are they on?');
+              return;
+            }
+            const membersXml = slaveData.map(s =>
+              '<member ipaddress="' + s.speaker.ip + '">' + s.deviceId + '</member>'
+            ).join('');
+            const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+              '<zone master="' + masterDeviceId + '" senderIPAddress="' + selectedSpeaker.ip + '">' +
+              membersXml + '</zone>';
+            await sendCommand(selectedSpeaker, '/setZone', 'POST', xml);
+            setShowGroupModal(false);
           };
 
           const toggleGroupSpeaker = (speaker) => {
@@ -550,6 +404,13 @@ function getHTMLContent() {
               return in_ ? prev.filter(s => s.ip !== speaker.ip) : [...prev, speaker];
             });
           };
+
+          // ── Polling fallback (refreshes now-playing every 15s) ────────────────
+          useEffect(() => {
+            if (!selectedSpeaker) return;
+            const interval = setInterval(() => fetchNowPlaying(), 15000);
+            return () => clearInterval(interval);
+          }, [selectedSpeaker?.ip]);
 
           // ── Cleanup ────────────────────────────────────────────────────────────
           useEffect(() => () => {
@@ -562,6 +423,21 @@ function getHTMLContent() {
           // ── Derived ────────────────────────────────────────────────────────────
           const isPlaying = playStatus === 'PLAY_STATE';
           const isBuffering = playStatus === 'BUFFERING_STATE';
+
+          const formatTime = (s) => {
+            const secs = Math.max(0, Math.floor(s));
+            return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+          };
+
+          useEffect(() => {
+            clearInterval(positionTimerRef.current);
+            if (isPlaying) {
+              positionTimerRef.current = setInterval(() => {
+                setTrackPosition(p => p + 1);
+              }, 1000);
+            }
+            return () => clearInterval(positionTimerRef.current);
+          }, [isPlaying, nowPlaying?.track]);
 
           // ── Render ─────────────────────────────────────────────────────────────
           return (
@@ -615,15 +491,10 @@ function getHTMLContent() {
                           <div className="text-blue-400"><SpeakerIcon/></div>
                           <div>
                             <p className="text-white font-semibold">{selectedSpeaker.name}</p>
-                            {groupedSpeakers.length > 0 && (
-                              <p className="text-slate-400 text-xs">
-                                + {groupedSpeakers.map(s => s.name).join(', ')}
-                              </p>
-                            )}
                           </div>
                         </div>
                         <div className="flex gap-2">
-                          <button onClick={() => setShowGroupModal(true)}
+                          <button onClick={() => { setShowGroupModal(true); setZoneError(null); }}
                             className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs transition">
                             {groupedSpeakers.length > 0 ? 'Group (' + (groupedSpeakers.length + 1) + ')' : 'Group'}
                           </button>
@@ -640,13 +511,41 @@ function getHTMLContent() {
                         </div>
                       </div>
 
+                      {/* Zone members */}
+                      {groupedSpeakers.length > 0 && (
+                        <div>
+                          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2 px-1">Zone Members</h3>
+                          <div className="space-y-2">
+                            {groupedSpeakers.map(spk => {
+                              const vol = zoneVolumes[spk.ip] ?? 50;
+                              return (
+                                <div key={spk.ip} className="bg-slate-700 rounded-xl p-3 flex items-center gap-3">
+                                  <div className="text-slate-400 flex-shrink-0"><SpeakerIcon/></div>
+                                  <span className="text-white text-sm font-medium w-28 flex-shrink-0">{spk.name}</span>
+                                  <input type="range" min="0" max="100" value={vol}
+                                    onChange={e => setZoneMemberVolume(spk, parseInt(e.target.value))}
+                                    className="flex-1 h-2 rounded-lg appearance-none cursor-pointer"
+                                    style={{ background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 ' + vol + '%, #475569 ' + vol + '%, #475569 100%)' }}
+                                  />
+                                  <span className="text-white text-sm w-8 text-right">{vol}</span>
+                                  <button onClick={() => removeFromZone(spk)}
+                                    className="text-slate-500 hover:text-red-400 transition flex-shrink-0" title="Remove from zone">
+                                    ✕
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
                       {/* Now playing */}
                       {nowPlaying && (
                         <div className="bg-slate-700 rounded-xl p-5">
                           <div className="flex items-start gap-4">
                             {nowPlaying.art && nowPlaying.art.startsWith('http') && (
-                              <img src={nowPlaying.art} alt="Art"
-                                   className="w-24 h-24 rounded-lg shadow-lg flex-shrink-0"/>
+                              <img src={nowPlaying.art} key={nowPlaying.art}
+                                   alt="Art" className="w-24 h-24 rounded-lg shadow-lg flex-shrink-0"/>
                             )}
                             <div className="flex-1 min-w-0">
                               {/* Source badge */}
@@ -676,6 +575,29 @@ function getHTMLContent() {
                               )}
                             </div>
                           </div>
+                          {nowPlaying.duration > 0 && (
+                            <div className="flex items-center gap-2 mt-3">
+                              <span className="text-slate-400 text-xs tabular-nums w-10 text-right">
+                                {formatTime(Math.min(trackPosition, nowPlaying.duration))}
+                              </span>
+                              <input type="range" min="0" max={nowPlaying.duration}
+                                value={Math.min(trackPosition, nowPlaying.duration)}
+                                onChange={() => {}}
+                                className="flex-1 h-1.5 rounded-full appearance-none"
+                                style={{
+                                  pointerEvents: 'none',
+                                  background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 ' +
+                                    Math.round(Math.min(trackPosition, nowPlaying.duration) / nowPlaying.duration * 100) +
+                                    '%, #475569 ' +
+                                    Math.round(Math.min(trackPosition, nowPlaying.duration) / nowPlaying.duration * 100) +
+                                    '%, #475569 100%)'
+                                }}
+                              />
+                              <span className="text-slate-400 text-xs tabular-nums w-10">
+                                -{formatTime(nowPlaying.duration - Math.min(trackPosition, nowPlaying.duration))}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -804,9 +726,11 @@ function getHTMLContent() {
 
               {/* Group modal */}
               {showGroupModal && (
-                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
-                  <div className="bg-slate-800 rounded-2xl p-6 max-w-xl w-full max-h-[85vh] overflow-y-auto border border-slate-700">
-                    <h2 className="text-xl font-bold text-white mb-1">Manage Group</h2>
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50"
+                     onClick={() => setShowGroupModal(false)}>
+                  <div className="bg-slate-800 rounded-2xl p-6 max-w-xl w-full max-h-[85vh] overflow-y-auto border border-slate-700"
+                       onClick={e => e.stopPropagation()}>
+                    <h2 className="text-xl font-bold text-white mb-1">Manage Zone</h2>
                     <p className="text-slate-400 text-sm mb-4">
                       Master: <span className="text-blue-400 font-medium">{selectedSpeaker.name}</span>
                     </p>
@@ -815,67 +739,33 @@ function getHTMLContent() {
                       {SPEAKERS.filter(s => s.ip !== selectedSpeaker.ip).map(speaker => {
                         const inGroup = groupedSpeakers.some(s => s.ip === speaker.ip);
                         return (
-                          <div key={speaker.ip} className={'rounded-xl border transition ' + (inGroup ? 'border-blue-500 bg-blue-600 bg-opacity-20' : 'border-slate-600 bg-slate-700')}>
-                            <div className="flex items-center justify-between p-3">
-                              <div className="flex items-center gap-2">
-                                <div className={'text-sm ' + (inGroup ? 'text-blue-300' : 'text-slate-300')}>
-                                  <SpeakerIcon/>
-                                </div>
-                                <span className={'font-medium text-sm ' + (inGroup ? 'text-white' : 'text-slate-200')}>
-                                  {speaker.name}
-                                </span>
-                              </div>
-                              <div className="flex gap-1">
-                                {inGroup ? (
-                                  <>
-                                    <button onClick={() => removeSpeakerFromZone(speaker)}
-                                      className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition"
-                                      title="Remove from zone">−</button>
-                                    <button onClick={() => toggleGroupSpeaker(speaker)}
-                                      className="px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white text-xs rounded transition"
-                                      title="Deselect">✕</button>
-                                  </>
-                                ) : (
-                                  <>
-                                    <button onClick={() => addSpeakerToZone(speaker)}
-                                      className="px-2 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded transition"
-                                      title="Add to existing zone">+</button>
-                                    <button onClick={() => toggleGroupSpeaker(speaker)}
-                                      className="px-2 py-1 bg-slate-600 hover:bg-blue-600 text-white text-xs rounded transition"
-                                      title="Queue for zone creation">☑</button>
-                                  </>
-                                )}
-                              </div>
+                          <div key={speaker.ip}
+                               onClick={() => toggleGroupSpeaker(speaker)}
+                               className={'rounded-xl border cursor-pointer transition p-3 flex items-center gap-3 ' +
+                                 (inGroup ? 'border-blue-500 bg-blue-600 bg-opacity-20 hover:bg-opacity-30' : 'border-slate-600 bg-slate-700 hover:bg-slate-600')}>
+                            <div className={'w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition ' +
+                              (inGroup ? 'border-blue-500 bg-blue-500' : 'border-slate-500')}>
+                              {inGroup && <span className="text-white text-xs font-bold">✓</span>}
                             </div>
+                            <div className={'flex-shrink-0 ' + (inGroup ? 'text-blue-300' : 'text-slate-400')}>
+                              <SpeakerIcon size={16}/>
+                            </div>
+                            <span className={'font-medium text-sm ' + (inGroup ? 'text-white' : 'text-slate-200')}>
+                              {speaker.name}
+                            </span>
                           </div>
                         );
                       })}
                     </div>
 
-                    <div className="bg-slate-700 rounded-lg p-3 text-xs text-slate-400 mb-4">
-                      <p><span className="text-green-400 font-medium">+</span> Add to existing live zone &nbsp;|&nbsp;
-                         <span className="text-slate-300 font-medium">☑</span> Queue for new zone &nbsp;|&nbsp;
-                         <span className="text-red-400 font-medium">−</span> Remove from live zone</p>
-                    </div>
+                    {zoneError && (
+                      <p className="text-red-400 text-xs mb-3 px-1">{zoneError}</p>
+                    )}
 
-                    <div className="flex gap-2 flex-wrap">
-                      {groupedSpeakers.length > 0 && (
-                        <button onClick={createZone}
-                          className="flex-1 px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition text-sm">
-                          Create Zone ({groupedSpeakers.length + 1} speakers)
-                        </button>
-                      )}
-                      {groupedSpeakers.length > 0 && (
-                        <button onClick={removeZone}
-                          className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition text-sm">
-                          Remove Zone
-                        </button>
-                      )}
-                      <button onClick={() => setShowGroupModal(false)}
-                        className="px-4 py-2.5 bg-slate-600 hover:bg-slate-500 text-white rounded-lg font-medium transition text-sm">
-                        Close
-                      </button>
-                    </div>
+                    <button onClick={applyZone}
+                      className="w-full px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition text-sm">
+                      {groupedSpeakers.length > 0 ? 'Apply (' + (groupedSpeakers.length + 1) + ' speakers)' : 'Remove Zone'}
+                    </button>
                   </div>
                 </div>
               )}
@@ -915,7 +805,3 @@ function getHTMLContent() {
         }
 
         ReactDOM.render(<BoseSoundTouchController/>, document.getElementById('root'));
-    </script>
-</body>
-</html>`;
-}
