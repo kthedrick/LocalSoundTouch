@@ -132,15 +132,36 @@ async function soapCall(ip, port, controlPath, action, args) {
   return httpPost(ip, port, controlPath, body, headers);
 }
 
-async function playUrl(ip, url, title) {
+function makeDIDL(url, title, contentType, artUrl) {
+  const escaped = url.replace(/&/g, '&amp;');
+  const safeTitle = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const artTag = artUrl ? `<upnp:albumArtURI>${artUrl.replace(/&/g, '&amp;')}</upnp:albumArtURI>` : '';
+  return `<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="1" parentID="0" restricted="1"><dc:title>${safeTitle}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>${artTag}<res protocolInfo="http-get:*:${contentType}:*">${escaped}</res></item></DIDL-Lite>`;
+}
+
+const MIME_FOR_EXT = {
+  '.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac', '.wma': 'audio/x-ms-wma', '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav', '.alac': 'audio/mp4',
+};
+
+function contentTypeFromUrl(url) {
+  const m = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+  return m ? (MIME_FOR_EXT['.' + m[1].toLowerCase()] || 'audio/mpeg') : 'audio/mpeg';
+}
+
+async function playUrl(ip, url, title, artUrl) {
   const device = await probeDevice(ip);
   if (!device) throw new Error('UPnP device not found on ' + ip);
   const { port, controlPath } = device;
 
+  const contentType = contentTypeFromUrl(url);
+  const metadata = makeDIDL(url, title, contentType, artUrl);
+
   await soapCall(ip, port, controlPath, 'SetAVTransportURI', {
     InstanceID: 0,
     CurrentURI: url,
-    CurrentURIMetaData: '',
+    CurrentURIMetaData: metadata,
   });
   return soapCall(ip, port, controlPath, 'Play', { InstanceID: 0, Speed: 1 });
 }
@@ -197,6 +218,61 @@ async function soundtouchPlay(speakerIp, streamUrl, title) {
   });
 }
 
+// ── Queue management ──────────────────────────────────────────────────────────
+const queues = {}; // speakerIp → { tracks, idx, timerId }
+
+async function getTransportState(ip) {
+  try {
+    const device = await probeDevice(ip);
+    if (!device) return null;
+    const { port, controlPath } = device;
+    const result = await soapCall(ip, port, controlPath, 'GetTransportInfo', { InstanceID: 0 });
+    const m = result.body.match(/<CurrentTransportState>([^<]+)<\/CurrentTransportState>/);
+    return m ? m[1] : null;
+  } catch (_) { return null; }
+}
+
+async function playQueueNext(speakerIp) {
+  const q = queues[speakerIp];
+  if (!q || q.idx >= q.tracks.length) {
+    delete queues[speakerIp];
+    return;
+  }
+  const track = q.tracks[q.idx++];
+  console.log(`[Queue] ${speakerIp} track ${q.idx}/${q.tracks.length}: ${track.title}`);
+  try {
+    await playUrl(speakerIp, track.url, track.title, track.artUrl);
+
+    // Two-phase poll:
+    //   Phase 1 — wait until we confirm PLAYING (up to 15s), so we don't
+    //             mistake the brief STOPPED/TRANSITIONING state right after
+    //             SetAVTransportURI for "track finished".
+    //   Phase 2 — once playing, watch for STOPPED and advance queue.
+    let seenPlaying = false;
+    let phase1Ticks = 0;
+    const pollInterval = setInterval(async () => {
+      if (!queues[speakerIp] || queues[speakerIp] !== q) { clearInterval(pollInterval); return; }
+      const state = await getTransportState(speakerIp);
+
+      if (!seenPlaying) {
+        if (state === 'PLAYING') { seenPlaying = true; return; }
+        // Give up waiting for PLAYING after 15s — something went wrong
+        if (++phase1Ticks >= 5) { clearInterval(pollInterval); delete queues[speakerIp]; }
+        return;
+      }
+
+      if (state === 'STOPPED' || state === 'NO_MEDIA_PRESENT') {
+        clearInterval(pollInterval);
+        playQueueNext(speakerIp);
+      }
+    }, 3000);
+    q.timerId = pollInterval;
+  } catch (err) {
+    console.error('[Queue] error:', err.message);
+    delete queues[speakerIp];
+  }
+}
+
 async function handleUpnp(req, res) {
   const urlPath = req.url.split('?')[0];
 
@@ -216,7 +292,7 @@ async function handleUpnp(req, res) {
   }
 
   if (urlPath === '/upnp/play' && req.method === 'POST') {
-    const { speakerIp, url, title } = await parseBody(req);
+    const { speakerIp, url, title, artUrl } = await parseBody(req);
     if (!speakerIp || !url) {
       res.writeHead(400); res.end('speakerIp and url required'); return;
     }
@@ -224,7 +300,7 @@ async function handleUpnp(req, res) {
     try {
       const device = await probeDevice(speakerIp);
       if (device) {
-        await playUrl(speakerIp, url, title || '');
+        await playUrl(speakerIp, url, title || '', artUrl);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, method: 'upnp' }));
         return;
@@ -242,11 +318,57 @@ async function handleUpnp(req, res) {
     return;
   }
 
+  if (urlPath === '/upnp/queue/skip' && req.method === 'POST') {
+    const { speakerIp } = await parseBody(req);
+    if (!speakerIp) { res.writeHead(400); res.end('speakerIp required'); return; }
+    const q = queues[speakerIp];
+    if (!q) { res.writeHead(200); res.end(JSON.stringify({ ok: true, msg: 'no queue' })); return; }
+    if (q.timerId) clearInterval(q.timerId);
+    try { await stopPlay(speakerIp); } catch (_) {}
+    await playQueueNext(speakerIp);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (urlPath === '/upnp/queue/prev' && req.method === 'POST') {
+    const { speakerIp } = await parseBody(req);
+    if (!speakerIp) { res.writeHead(400); res.end('speakerIp required'); return; }
+    const q = queues[speakerIp];
+    if (!q) { res.writeHead(200); res.end(JSON.stringify({ ok: true, msg: 'no queue' })); return; }
+    if (q.timerId) clearInterval(q.timerId);
+    q.idx = Math.max(0, q.idx - 2); // -1 for current (already incremented), -1 more to go back
+    try { await stopPlay(speakerIp); } catch (_) {}
+    await playQueueNext(speakerIp);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (urlPath === '/upnp/queue' && req.method === 'POST') {
+    const { speakerIp, tracks } = await parseBody(req);
+    if (!speakerIp || !Array.isArray(tracks) || !tracks.length) {
+      res.writeHead(400); res.end('speakerIp and tracks[] required'); return;
+    }
+    if (queues[speakerIp]?.timerId) clearInterval(queues[speakerIp].timerId);
+    queues[speakerIp] = { tracks, idx: 0, timerId: null };
+    try {
+      await playQueueNext(speakerIp);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, total: tracks.length }));
+    } catch (err) {
+      res.writeHead(500); res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+    return;
+  }
+
   if (urlPath === '/upnp/stop' && req.method === 'POST') {
     const { speakerIp } = await parseBody(req);
     if (!speakerIp) {
       res.writeHead(400); res.end('speakerIp required'); return;
     }
+    if (queues[speakerIp]?.timerId) clearInterval(queues[speakerIp].timerId);
+    delete queues[speakerIp];
     try {
       await stopPlay(speakerIp);
       res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -118,6 +118,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
+  const [shuffle, setShuffle] = useState(false);
 
   useEffect(() => {
     fetch('/serverInfo').then(r => r.json()).then(d => setServerBase(d.base)).catch(() => {});
@@ -145,13 +146,13 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
     setCurrentPath(next);
   };
 
-  const playUrl = async (url, title) => {
+  const playUrl = async (url, title, artUrl) => {
     setStatus('Playing: ' + title);
     try {
       const res = await fetch('/upnp/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speakerIp, url, title }),
+        body: JSON.stringify({ speakerIp, url, title, artUrl }),
       });
       const data = await res.json();
       if (!data.ok) setStatus('Error: ' + data.error);
@@ -160,22 +161,61 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
     }
   };
 
+  const shuffleArray = (arr) => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+
   const playTrack = (file) => {
     const filePath = (currentPath === '/' ? '' : currentPath) + '/' + file;
     const url = serverBase + '/nas/stream?path=' + encodeURIComponent(filePath);
-    playUrl(url, file.replace(/\.[^.]+$/, ''));
+    const artUrl = entries?.artFile
+      ? serverBase + '/nas/art?path=' + encodeURIComponent(currentPath.replace(/\/$/, '') + '/' + entries.artFile)
+      : null;
+    playUrl(url, file.replace(/\.[^.]+$/, ''), artUrl);
+  };
+
+  const queueFolder = async (folderPath, title) => {
+    setStatus('Loading...');
+    try {
+      const data = await fetch('/nas/browse?path=' + encodeURIComponent(folderPath)).then(r => r.json());
+      let files = data.files || [];
+      if (shuffle) files = shuffleArray(files);
+      if (!files.length) { setStatus('No audio files found'); return; }
+      const base = folderPath.replace(/\/$/, '');
+      const artUrl = data.artFile
+        ? serverBase + '/nas/art?path=' + encodeURIComponent(base + '/' + data.artFile)
+        : null;
+      const tracks = files.map(f => ({
+        url: serverBase + '/nas/stream?path=' + encodeURIComponent(base + '/' + f),
+        title: f.replace(/\.[^.]+$/, ''),
+        artUrl,
+      }));
+      const res = await fetch('/upnp/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakerIp, tracks }),
+      });
+      const d = await res.json();
+      if (!d.ok) setStatus('Error: ' + d.error);
+      else setStatus('Queue: ' + title + ' (' + tracks.length + ' tracks' + (shuffle ? ', shuffled' : '') + ')');
+    } catch (e) {
+      setStatus('Error: ' + e.message);
+    }
   };
 
   const playFolder = (folder) => {
     const folderPath = (currentPath === '/' ? '' : currentPath) + '/' + folder;
-    const url = serverBase + '/nas/m3u?path=' + encodeURIComponent(folderPath);
-    playUrl(url, folder);
+    queueFolder(folderPath, folder);
   };
 
   const playCurrentFolder = () => {
-    const url = serverBase + '/nas/m3u?path=' + encodeURIComponent(currentPath);
     const name = currentPath.split('/').filter(Boolean).pop() || 'folder';
-    playUrl(url, name);
+    queueFolder(currentPath, name);
   };
 
   const breadcrumbs = currentPath.split('/').filter(Boolean).slice(2); // skip volume1/music
@@ -192,7 +232,14 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
             <h2 className="text-white font-semibold text-sm">Browse NAS</h2>
             <p className="text-blue-400 text-xs">{speakerName}</p>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl leading-none px-1">×</button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShuffle(s => !s)}
+              className={'px-2 py-1 rounded text-xs transition ' + (shuffle ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-400 hover:text-white')}
+              title="Shuffle">
+              ⇄ Shuffle
+            </button>
+            <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl leading-none px-1">×</button>
+          </div>
         </div>
 
         {/* Breadcrumb */}
@@ -266,7 +313,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, otherSpeakers, speakerData, groups }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, otherSpeakers, speakerData, groups, onOpenNas }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   const isStandby   = !np || np.source === 'STANDBY';
@@ -274,6 +321,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
   const hasContent  = !isStandby && (np?.track || np?.stationName || np?.source);
 
   const [position, setPosition] = useState(np?.position || 0);
+  const [artModal, setArtModal] = useState(false);
   const timerRef = useRef(null);
 
   useEffect(() => { setPosition(np?.position || 0); }, [np?.track, np?.stationName, np?.source]);
@@ -303,7 +351,8 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
           <div className="flex items-start gap-3">
             {np.art && np.art.startsWith('http') && (
               <img src={np.art} key={np.art} alt="Art"
-                   className="w-16 h-16 rounded-lg object-cover flex-shrink-0"/>
+                   onClick={() => setArtModal(true)}
+                   className="w-16 h-16 rounded-lg object-cover flex-shrink-0 cursor-pointer hover:opacity-80 transition-opacity"/>
             )}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -481,6 +530,24 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* NAS */}
+      <div className="px-4 py-2.5 border-t border-slate-700/60 flex justify-end">
+        <button onClick={onOpenNas}
+          className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded text-xs transition">
+          📁 Browse NAS
+        </button>
+      </div>
+
+      {/* Album art modal */}
+      {artModal && np?.art && (
+        <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-50"
+             onClick={() => setArtModal(false)}>
+          <img src={np.art} alt="Album art"
+               className="rounded-xl shadow-2xl object-contain"
+               style={{ width: '70vmin', height: '70vmin' }}/>
         </div>
       )}
     </div>
@@ -720,9 +787,33 @@ function AllSpeakersView() {
   };
 
   const onKey = (ip, key) => {
+    // When playing via UPnP, NEXT/PREV must go through our queue, not the Bose key API
+    if (key === 'NEXT_TRACK' || key === 'PREV_TRACK') {
+      const src = speakerData[ip]?.nowPlaying?.source;
+      if (src === 'LOCAL_INTERNET_RADIO' || src === 'UPNP' || src === 'UPnP') {
+        const endpoint = key === 'NEXT_TRACK' ? '/upnp/queue/skip' : '/upnp/queue/prev';
+        fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speakerIp: ip }),
+        });
+        return;
+      }
+    }
     apiPost(ip, '/key', '<key state="press" sender="Gabbo">' + key + '</key>');
     setTimeout(() => apiPost(ip, '/key', '<key state="release" sender="Gabbo">' + key + '</key>'), 100);
     if (key === 'PLAY_PAUSE' || key.startsWith('PRESET_')) setTimeout(pollAll, 800);
+  };
+
+  const powerOffAll = () => {
+    const activeMasters = groups
+      .filter(g => {
+        const m = g.speakers.find(s => s.ip === g.masterIp) || g.speakers[0];
+        return m?.reachable && m?.nowPlaying?.source !== 'STANDBY' && m?.nowPlaying;
+      })
+      .map(g => g.masterIp);
+    activeMasters.forEach(ip => onKey(ip, 'POWER'));
+    if (activeMasters.length) setTimeout(pollAll, 1500);
   };
 
   if (loading) {
@@ -750,10 +841,11 @@ function AllSpeakersView() {
               className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
               Refresh
             </button>
-            <a href="/"
-              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
-              Classic
-            </a>
+            <button onClick={powerOffAll}
+              title="Power off all speakers"
+              className="px-3 py-1.5 bg-slate-700 hover:bg-red-700 text-slate-300 hover:text-white rounded-lg text-xs transition">
+              ⏻ All Off
+            </button>
           </div>
         </div>
 
@@ -762,21 +854,14 @@ function AllSpeakersView() {
           {groups.map(group => {
             const master = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
             return (
-              <div key={group.id} className="relative">
-                <GroupCard group={group}
-                  onVolumeChange={onVolumeChange} onMute={onMute} onKey={onKey}
-                  onSyncTo={syncSpeakerTo} onAddToGroup={addSpeakerToGroup} onRemoveFromGroup={removeSpeakerFromGroup}
-                  otherSpeakers={speakers.filter(s => !group.speakers.some(gs => gs.ip === s.ip))}
-                  speakerData={speakerData}
-                  groups={groups}
-                />
-                <button
-                  onClick={() => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp })}
-                  className="absolute top-3 right-3 px-2 py-1 bg-slate-600 hover:bg-slate-500 text-slate-300 hover:text-white rounded text-xs transition"
-                  title="Browse NAS music">
-                  📁 NAS
-                </button>
-              </div>
+              <GroupCard key={group.id} group={group}
+                onVolumeChange={onVolumeChange} onMute={onMute} onKey={onKey}
+                onSyncTo={syncSpeakerTo} onAddToGroup={addSpeakerToGroup} onRemoveFromGroup={removeSpeakerFromGroup}
+                otherSpeakers={speakers.filter(s => !group.speakers.some(gs => gs.ip === s.ip))}
+                speakerData={speakerData}
+                groups={groups}
+                onOpenNas={() => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp })}
+              />
             );
           })}
         </div>

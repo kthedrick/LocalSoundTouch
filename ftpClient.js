@@ -110,6 +110,37 @@ function parseListing(raw) {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+// Returns all filenames in a directory (no filtering by extension)
+async function listAll(host, user, pass, ftpPath) {
+  const ctrl = await openControl(host);
+  try {
+    await login(ctrl, user, pass);
+    const { ip, port } = await pasv(ctrl);
+    const data = await openData(ip, port);
+    ctrl.write(`LIST ${ftpPath || '/'}\r\n`);
+    const raw = await collectStream(data);
+    ctrl.end();
+    const files = [];
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      let isDir = false, name = '';
+      const unix = t.match(/^([dl-])[\w-]{9}\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/);
+      if (unix) { isDir = unix[1] === 'd'; name = unix[2].trim(); }
+      else {
+        const win = t.match(/^\S+\s+\S+\s+(<DIR>|\d+)\s+(.+)$/);
+        if (win) { isDir = win[1] === '<DIR>'; name = win[2].trim(); }
+      }
+      if (!name || name === '.' || name === '..' || isDir) continue;
+      files.push(name);
+    }
+    return files;
+  } catch (err) {
+    ctrl.destroy();
+    throw err;
+  }
+}
+
 async function list(host, user, pass, ftpPath) {
   const ctrl = await openControl(host);
   try {
@@ -141,10 +172,14 @@ async function getFileSize(host, user, pass, ftpPath) {
 }
 
 // Returns { dataSocket, ctrl } — caller must pipe dataSocket and then ctrl.end()
-async function retrieve(host, user, pass, ftpPath) {
+async function retrieve(host, user, pass, ftpPath, startByte = 0) {
   const ctrl = await openControl(host);
   try {
     await login(ctrl, user, pass);
+    if (startByte > 0) {
+      // REST tells the server to start the transfer from this byte offset
+      await cmd(ctrl, `REST ${startByte}`);
+    }
     const { ip, port } = await pasv(ctrl);
     const dataSocket = await openData(ip, port);
     ctrl.write(`RETR ${ftpPath}\r\n`);
@@ -155,4 +190,4 @@ async function retrieve(host, user, pass, ftpPath) {
   }
 }
 
-module.exports = { list, retrieve, getFileSize };
+module.exports = { list, listAll, retrieve, getFileSize };
