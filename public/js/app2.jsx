@@ -313,7 +313,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, otherSpeakers, speakerData, groups, onOpenNas }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, otherSpeakers, speakerData, groups, onOpenNas, onMaStop, haConfig, onPlayFavorite }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   const isStandby   = !np || np.source === 'STANDBY';
@@ -322,7 +322,20 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
 
   const [position, setPosition] = useState(np?.position || 0);
   const [artModal, setArtModal] = useState(false);
+  const [favStatus, setFavStatus] = useState(null);
   const timerRef = useRef(null);
+
+  const handlePlayFavorite = async (fav) => {
+    const queueId = (master?.name && haConfig?.speakerQueues?.[master.name]) || fav.defaultQueueId;
+    setFavStatus('Starting ' + fav.name + '...');
+    try {
+      const d = await onPlayFavorite(fav, queueId);
+      setFavStatus(d.ok ? fav.name + ' started ✓' : 'Error: ' + JSON.stringify(d.result || d.error));
+    } catch (e) {
+      setFavStatus('Error: ' + e.message);
+    }
+    setTimeout(() => setFavStatus(null), 6000);
+  };
 
   useEffect(() => { setPosition(np?.position || 0); }, [np?.track, np?.stationName, np?.source]);
 
@@ -420,6 +433,16 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
                 <span className="text-slate-200 text-sm font-medium block">{spk.name}</span>
                 <span className="text-slate-500 text-[11px] block">{spk.ip}</span>
               </div>
+              {spk.reachable && (
+                <button onClick={() => onKey(spk.ip, 'POWER')}
+                  title={spk.nowPlaying?.source === 'STANDBY' ? 'Power on' : 'Power off'}
+                  className={'p-1.5 rounded-lg transition flex-shrink-0 ' +
+                    (spk.nowPlaying?.source === 'STANDBY'
+                      ? 'text-slate-600 hover:text-green-400 hover:bg-slate-700'
+                      : 'text-slate-400 hover:text-red-400 hover:bg-slate-700')}>
+                  <PowerIcon size={15}/>
+                </button>
+              )}
             </div>
 
             {/* Volume controls + remove button */}
@@ -472,6 +495,22 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
           </div>
         ))}
       </div>
+
+      {/* Pandora */}
+      {haConfig?.favorites?.length > 0 && (
+        <div className="px-4 py-3 border-t border-slate-700/60">
+          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Pandora</h3>
+          <div className="flex gap-1.5 flex-wrap">
+            {haConfig.favorites.map((fav, i) => (
+              <button key={i} onClick={() => handlePlayFavorite(fav)}
+                className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-xs font-medium transition flex items-center gap-1.5 flex-shrink-0">
+                <span>{fav.icon}</span><span>{fav.name}</span>
+              </button>
+            ))}
+          </div>
+          {favStatus && <p className="text-indigo-300 text-xs mt-1.5 italic">{favStatus}</p>}
+        </div>
+      )}
 
       {/* Presets */}
       {master.presets && master.presets.length > 0 && (
@@ -533,8 +572,14 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
         </div>
       )}
 
-      {/* NAS */}
-      <div className="px-4 py-2.5 border-t border-slate-700/60 flex justify-end">
+      {/* Bottom bar: Release to TV + NAS */}
+      <div className="px-4 py-2.5 border-t border-slate-700/60 flex items-center justify-between gap-2">
+        {haConfig?.releaseToTV?.includes(master?.name) && onMaStop ? (
+          <button onClick={() => onMaStop(group.masterIp)}
+            className="px-3 py-1 bg-slate-700 hover:bg-red-800 text-slate-400 hover:text-white rounded text-xs transition">
+            ⏏ Release to TV
+          </button>
+        ) : <div/>}
         <button onClick={onOpenNas}
           className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded text-xs transition">
           📁 Browse NAS
@@ -561,6 +606,7 @@ function AllSpeakersView() {
   const [loading, setLoading]         = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [nasBrowser, setNasBrowser] = useState(null); // { ip, name }
+  const [haConfig, setHaConfig] = useState(null);
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
 
@@ -597,6 +643,7 @@ function AllSpeakersView() {
     };
 
     load();
+    fetch('/ha/config').then(r => r.json()).then(setHaConfig).catch(() => {});
     const interval = setInterval(async () => {
       const discovered = await fetchSpeakers();
       await pollAll(discovered);
@@ -646,8 +693,8 @@ function AllSpeakersView() {
       return 1;
     };
     result.sort((a, b) => {
-      const aHasSunroom = a.speakers.some(s => s.ip === '192.168.1.229');
-      const bHasSunroom = b.speakers.some(s => s.ip === '192.168.1.229');
+      const aHasSunroom = a.speakers.some(s => s.name === 'Bose-Sunroom 300');
+      const bHasSunroom = b.speakers.some(s => s.name === 'Bose-Sunroom 300');
       if (aHasSunroom && !bHasSunroom) return -1;
       if (!aHasSunroom && bHasSunroom) return 1;
       return rank(a) - rank(b);
@@ -787,6 +834,20 @@ function AllSpeakersView() {
   };
 
   const onKey = (ip, key) => {
+    // When powering off a speaker playing via MA/AirPlay, stop+clear MA queues so it won't auto-restart
+    if (key === 'POWER') {
+      const src = speakerData[ip]?.nowPlaying?.source;
+      if (src === 'AIRPLAY') {
+        const name = speakerData[ip]?.name;
+        const speakerQueueId = name && haConfig?.speakerQueues?.[name];
+        const airplayGroupId = haConfig?.queues?.airplayGroup;
+        const queuesToKill = [...new Set([speakerQueueId, airplayGroupId].filter(Boolean))];
+        queuesToKill.forEach(queueId => {
+          fetch('/ha/stop',  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
+          fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
+        });
+      }
+    }
     // When playing via UPnP, NEXT/PREV must go through our queue, not the Bose key API
     if (key === 'NEXT_TRACK' || key === 'PREV_TRACK') {
       const src = speakerData[ip]?.nowPlaying?.source;
@@ -799,10 +860,46 @@ function AllSpeakersView() {
         });
         return;
       }
+      if (src === 'AIRPLAY') {
+        const name = speakerData[ip]?.name;
+        const queueId = (name && haConfig?.speakerQueues?.[name]) || haConfig?.queues?.airplayGroup;
+        if (queueId) {
+          fetch(key === 'NEXT_TRACK' ? '/ha/next' : '/ha/prev', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ queueId }),
+          });
+          return;
+        }
+      }
     }
     apiPost(ip, '/key', '<key state="press" sender="Gabbo">' + key + '</key>');
     setTimeout(() => apiPost(ip, '/key', '<key state="release" sender="Gabbo">' + key + '</key>'), 100);
     if (key === 'PLAY_PAUSE' || key.startsWith('PRESET_')) setTimeout(pollAll, 800);
+    if (key === 'POWER') setTimeout(pollAll, 1500);
+  };
+
+  const onMaStop = (speakerIp) => {
+    const name = speakerData[speakerIp]?.name;
+    const queueId = (name && haConfig?.speakerQueues?.[name]) || haConfig?.queues?.airplayGroup;
+    if (!queueId) return;
+    fetch('/ha/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ queueId }),
+    }).then(() => setTimeout(pollAll, 1000));
+  };
+
+  const playFavorite = async (fav, queueId) => {
+    const targetQueue = queueId || fav.defaultQueueId;
+    const res = await fetch('/ha/play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ queueId: targetQueue, uri: fav.uri }),
+    });
+    const d = await res.json();
+    if (d.ok) setTimeout(pollAll, 3000);
+    return d;
   };
 
   const powerOffAll = () => {
@@ -861,6 +958,9 @@ function AllSpeakersView() {
                 speakerData={speakerData}
                 groups={groups}
                 onOpenNas={() => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp })}
+                onMaStop={onMaStop}
+                haConfig={haConfig}
+                onPlayFavorite={playFavorite}
               />
             );
           })}

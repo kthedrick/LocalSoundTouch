@@ -40,6 +40,9 @@ Implementation:
 ### Server-side WebSocket Queue (Polish)
 Replace 3s `GetTransportInfo` polling for queue advancement with a WebSocket subscription to `ws://<speakerIp>:8080`. Speaker pushes `nowPlayingUpdated` events — when `playStatus` hits `STOP_STATE` with source=UPnP, advance the queue immediately. Requires implementing WebSocket client handshake in Node.js `net` module (~50 lines, no npm).
 
+### Bose-Bedroom AirPlay
+Bose-Bedroom is the only Bose speaker without native AirPlay support. To play AirPlay audio there, a separate AirPlay device is connected to its Aux 1 input. This needs UI/integration work before tackling WiiM speakers.
+
 ### WiiM Speaker Support
 User has WiiM speakers now alongside Bose SoundTouch. WiiM devices are excellent UPnP renderers — the entire NAS/UPnP playback stack works unchanged. What needs work:
 - Volume, mute, now-playing, presets: WiiM uses the Linkplay HTTP API (different endpoints, mostly JSON) instead of Bose's port 8090 XML API

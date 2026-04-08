@@ -5,6 +5,7 @@ const speakerDiscovery = require('./speakerDiscovery');
 const handleNas = require('./nasHandler');
 const upnpModule = require('./upnpHandler');
 const handleUpnp = upnpModule.handle;
+const handleHa = require('./haHandler');
 
 const publicDir = path.join(__dirname, 'public');
 
@@ -44,6 +45,11 @@ module.exports = function handleRequest(req, res, serverBase) {
 
   if (req.url.startsWith('/upnp/')) {
     handleUpnp(req, res);
+    return;
+  }
+
+  if (req.url.startsWith('/ha/')) {
+    handleHa(req, res);
     return;
   }
 

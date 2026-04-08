@@ -1,0 +1,8 @@
+.git
+.gitignore
+.claude
+*.pdf
+*.md
+nasConfig.json
+node_modules
+deploy.sh
