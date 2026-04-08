@@ -42,6 +42,12 @@ See CONTEXT.md for full architecture, technical decisions, and speaker/NAS detai
 
 **UI problem still open:** When speakers are grouped via MA/HA, our app doesn't show them as grouped — we build zones from Bose's `/getZone` which knows nothing about MA groups. Need to either poll HA entity state for group_members or track MA group state in the server. Not solved yet.
 
+**UI requirements for MA groups (to discuss next session):**
+- Temporary sync groups MUST appear in our UI as a grouped zone (same as Bose zones)
+- User must be able to break the group (unjoin) from the UI even if one or both speakers are off/standby
+- This may require significant UI changes — current zone building assumes speakers are reachable and Bose-zone-aware
+- Likely approach: poll HA entity state for `group_members` attribute on MA entities, merge with Bose zone data, surface a "break group" button that calls `media_player.unjoin` regardless of speaker power state
+
 **Current app-side code for Include (app2.jsx):** when `np.source === 'AIRPLAY'` and both `masterQueueId` and `targetQueueId` are known, calls `POST /ha/group-include { masterId, playerId }`. This is correct — just the server-side needs to be updated to use HA API.
 
 ---

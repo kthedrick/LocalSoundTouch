@@ -1,6 +1,6 @@
 // HTTP handler for /ha/* routes — Music Assistant integration
 
-const { stopQueue, clearQueue, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
+const { stopQueue, clearQueue, getAllPlayers, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -106,8 +106,12 @@ async function handleHa(req, res) {
     const body = await readBody(req);
     try {
       const result = await playMedia(body.queueId, body.uri);
+      console.log('[ha/play] queueId=%s uri=%s result=%j', body.queueId, body.uri, result);
       ok(res, { result });
-    } catch (e) { err(res, e.message); }
+    } catch (e) {
+      console.error('[ha/play] error:', e.message);
+      err(res, e.message);
+    }
     return;
   }
 
@@ -132,6 +136,62 @@ async function handleHa(req, res) {
     });
     proxyReq.on('error', e => { res.writeHead(500); res.end(e.message); });
     proxyReq.end();
+    return;
+  }
+
+  // GET /ha/queue-uri?queueId=... — return current playing URI for a queue
+  if (url.startsWith('/ha/queue-uri') && req.method === 'GET') {
+    const queueId = new URL('http://x' + url).searchParams.get('queueId');
+    try {
+      const queues = await getAllQueues();
+      const queue = Array.isArray(queues) ? queues.find(q => q.queue_id === queueId) : null;
+      const uri = queue?.current_item?.media_item?.uri || null;
+      ok(res, { uri });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/debug — log client state for debugging
+  if (url === '/ha/debug' && req.method === 'POST') {
+    const body = await readBody(req);
+    console.log('[ha/debug]', JSON.stringify(body));
+    ok(res, {});
+    return;
+  }
+
+  // POST /ha/group-include — add a player to the master's MA group { masterId, playerId }
+  if (url === '/ha/group-include' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const players = await getAllPlayers();
+      const master = Array.isArray(players) ? players.find(p => p.player_id === body.masterId) : null;
+      const current = master?.group_members || [body.masterId];
+      const members = current.includes(body.playerId) ? current : [...current, body.playerId];
+      const result = await setMembers(body.masterId, members);
+      console.log('[ha/group-include] %s + %s members=%j result=%j', body.masterId, body.playerId, members, result);
+      ok(res, { result, members });
+    } catch (e) {
+      console.error('[ha/group-include] error:', e.message);
+      err(res, e.message);
+    }
+    return;
+  }
+
+  // POST /ha/group-remove — remove a player from the master's MA group { masterId, playerId }
+  if (url === '/ha/group-remove' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const players = await getAllPlayers();
+      const master = Array.isArray(players) ? players.find(p => p.player_id === body.masterId) : null;
+      const current = master?.group_members || [body.masterId];
+      const members = current.filter(id => id !== body.playerId);
+      const result = await setMembers(body.masterId, members.length ? members : [body.masterId]);
+      console.log('[ha/group-remove] %s - %s members=%j result=%j', body.masterId, body.playerId, members, result);
+      ok(res, { result, members });
+    } catch (e) {
+      console.error('[ha/group-remove] error:', e.message);
+      err(res, e.message);
+    }
     return;
   }
 

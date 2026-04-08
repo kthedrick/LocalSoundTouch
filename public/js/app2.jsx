@@ -557,8 +557,29 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
             {otherSpeakers.map(spk => {
               const data = speakerData[spk.ip];
               const isPlaying = data?.nowPlaying?.source && data.nowPlaying.source !== 'STANDBY';
+              const handleInclude = () => {
+                const masterQueueId = master?.name && haConfig?.speakerQueues?.[master.name];
+                const targetQueueId = spk.name && haConfig?.speakerQueues?.[spk.name];
+                fetch('/ha/debug', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ source: np?.source, masterName: master?.name, spkName: spk.name, masterQueueId, targetQueueId }),
+                });
+                if (np?.source === 'AIRPLAY') {
+                  // MA/AirPlay session: add target to master's MA group via set_members
+                  if (masterQueueId && targetQueueId) {
+                    fetch('/ha/group-include', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ masterId: masterQueueId, playerId: targetQueueId }),
+                    });
+                    return;
+                  }
+                }
+                onAddToGroup(group.masterIp, spk.ip);
+              };
               return (
-                <button key={spk.ip} onClick={() => onAddToGroup(group.masterIp, spk.ip)}
+                <button key={spk.ip} onClick={handleInclude}
                   className={'px-2 py-1 rounded text-xs transition ' +
                     (isPlaying
                       ? 'bg-green-600 hover:bg-green-500 text-white'
