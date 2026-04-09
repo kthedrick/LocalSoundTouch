@@ -66,65 +66,48 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 
 **`maClient.js`** — thin MA API client (no npm):
 - `maPost(command, args)` — authenticated POST to MA REST API
-- `playMedia(queueId, uri)` — play a URI on a specific queue (option: 1 = replace + play immediately)
-- `stopQueue`, `pauseQueue`, `resumeQueue`, `nextTrack`, `prevTrack`, `getAllQueues`
+- `playMedia(queueId, uri)` — play a URI on a specific queue (`option: 'replace'`)
+- `stopQueue`, `clearQueue`, `pauseQueue`, `resumeQueue`, `nextTrack`, `prevTrack`, `getAllQueues`
 - Config (token, URL, queue IDs) read from `haConfig.json`
 
-**`haHandler.js`** — HTTP routes for MA:
+**`haHandler.js`** — HTTP routes for MA and HA:
 | Route | Purpose |
 |-------|---------|
-| `GET /ha/config` | Returns safe config (queues, favorites) for the UI |
+| `GET /ha/config` | Returns safe config (queues, speakerQueues, speakerEntities, favorites, playRedirects) for the UI |
 | `GET /ha/queues` | Lists all MA queues (discovery/debug) |
+| `GET /ha/group-state` | Returns active MA sync groups by polling HA entity `group_members` attributes |
+| `GET /ha/queue-now-playing?queueId=` | Returns track/artist/art/duration/position from MA queue |
+| `GET /ha/raw-states` | Dumps raw HA entity states for all speakerEntities (debug) |
+| `GET /ha/ma-entities` | Lists all non-STP media_player entities from HA (debug/discovery) |
 | `POST /ha/stop` | Stop a queue `{ queueId }` |
 | `POST /ha/pause` | Pause a queue |
 | `POST /ha/resume` | Resume a queue |
 | `POST /ha/next` | Next track |
 | `POST /ha/prev` | Previous track |
-| `POST /ha/play` | Play a URI on a queue `{ queueId, uri }` |
-| `GET /ha/schema` | Proxy MA's OpenAPI schema (debug) |
+| `POST /ha/play` | Play a URI `{ queueId, uri }` — checks `playRedirects` before playing |
+| `POST /ha/clear` | Clear a queue |
+| `POST /ha/group-include` | Join speaker into MA group via HA `media_player.join` `{ masterName, speakerName }` |
+| `POST /ha/group-remove` | Unjoin speaker from MA group via HA `media_player.unjoin` `{ speakerName }` |
 
-**`haConfig.json`** (git-ignored) — MA configuration:
-```json
-{
-  "maUrl": "http://localhost:8095",
-  "maToken": "<long-lived MA token>",
-  "queues": {
-    "sunroom": "upb0d5cccfcf13",
-    "livingRoom": "up304511da849b",
-    "kitchen": "upf8369b11ce57",
-    "bedroom": "up04a316bee3e0",
-    "bathroom": "upapf4e11ee0766b",
-    "diningRoom": "up3881d72fc987",
-    "office": "upf45eab9402de",
-    "patio": "upd8a98bcbc0f6",
-    "joshuaBose": "upb0d5cc50ef39",
-    "joshuaWiim": "up9cb8b438124c",
-    "wiimBasement": "up00226c2e2da2",
-    "airplayGroup": "syncgroup_q6vlw5pk"
-  },
-  "releaseToTV": ["Bose-Sunroom 300"],
-  "speakerQueues": {
-    "Bose-Sunroom 300": "upb0d5cccfcf13",
-    "Bose-Living Room": "up304511da849b"
-  },
-  "favorites": [
-    {
-      "name": "Radiohead Radio",
-      "icon": "📻",
-      "defaultQueueId": "syncgroup_q6vlw5pk",
-      "uri": "library://radio/2"
-    }
-  ]
-}
-```
+**`haConfig.json`** — MA + HA configuration (deployed via deploy.sh, NOT git-tracked):
 
-**MA API details:**
-- MA is in beta; REST endpoint is `POST http://localhost:8095/api` with `{ command, args }`
-- Queue IDs for Bose speakers look like `upb0d5cccfcf13` (prefix = `up` + MAC fragment)
-- AirPlay group ID: `syncgroup_q6vlw5pk`
-- When Bose speakers play MA content, the Bose `/nowPlaying` source shows `AIRPLAY`
-- `player_queues/play_media` with `option: 1` is supposed to replace queue and play immediately
-- MA token is a long-lived JWT stored in HA → Settings → People → user → tokens
+Key sections:
+- `haUrl` / `haToken` — HA REST API base URL and long-lived token (separate from MA token)
+- `maUrl` / `maToken` — MA REST API and token
+- `queues` — named MA queue IDs for internal use
+- `speakerQueues` — maps Bose speaker name → MA queue ID (used for per-speaker favorites + skip/prev routing)
+- `speakerEntities` — maps Bose speaker name → HA `media_player` entity ID (used for MA grouping via HA)
+- `releaseToTV` — list of speaker names that show the "Release to TV" button
+- `favorites` — list of `{ name, icon, uri, defaultQueueId }` shown as one-tap play buttons
+- `groupSideEffects` — rules that flip HA switches when specific speakers are grouped/ungrouped
+- `playRedirects` — intercepts `/ha/play` for speakers needing special routing (e.g. Bedroom → Belkin AUX)
+
+**MA API details (confirmed working):**
+- REST endpoint: `POST http://localhost:8095/api` with `{ command, args }` and Bearer MA token
+- `play_media` args: `{ queue_id, media: uri, option: 'replace' }` — use `media` NOT `uri`; `option` must be string not int
+- Queue IDs: `up` + MAC fragment for Bose/UPnP; `syncgroup_*` for AirPlay groups; `upuuid*` for some AirPlay adapters
+- Grouping is NOT available in MA REST API — use HA `media_player.join`/`unjoin` instead
+- MA token: long-lived JWT from HA → Settings → People → user → Long-Lived Access Tokens
 
 ### UI (`public/js/app2.jsx`)
 - React 18 UMD + Babel standalone (no build step)
@@ -136,10 +119,15 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 #### Key behavioral details
 - **Speaker identification:** All logic uses Bose speaker names (from `/info` API), not IPs. IPs can change; names are stable. Discovery maps IP→name at runtime.
 - **Favorites (MA):** Shown in GroupCard when `haConfig.speakerQueues[master.name]` exists. One-tap plays the favorite's URI on that speaker's MA queue.
-- **AIRPLAY source routing:** When `nowPlaying.source === 'AIRPLAY'`, skip/prev buttons route through MA (`/ha/next`, `/ha/prev`) instead of Bose key API, because Bose keys don't control MA-driven playback.
-- **Release to TV:** Shown only on speakers listed in `haConfig.releaseToTV` (currently Sunroom 300). Stops the MA queue so HA doesn't aggressively restart playback when the soundbar switches to TV input.
+- **AIRPLAY source routing:** When `nowPlaying.source === 'AIRPLAY'`, skip/prev/include all route through MA instead of Bose API. Power-off also calls MA stop+clear+group-remove.
+- **AUX source routing:** When source is `AUX` and a `playRedirect` exists for the speaker's queue, skip/prev route through MA on the redirect's `toQueue`. MA track data is also polled from the redirect queue.
+- **MA group display:** `AllSpeakersView` polls `/ha/group-state` every 15s. Detected MA groups are merged into Bose zone cards in the UI — members are appended to the leader's card and their standalone cards are suppressed.
+- **Release to TV:** Shown only on speakers in `haConfig.releaseToTV` (Sunroom 300). Stops+clears MA queue so HA doesn't auto-restart when soundbar switches to TV.
 - **Per-speaker power button (⏻):** Shown in the speaker header row of each zone card.
 - **Sort order:** Sunroom 300 sorts first; other zones follow alphabetically.
+- **MA track metadata:** When source=AIRPLAY or source=AUX (with redirect), polls `/ha/queue-now-playing` for track/artist/art/duration/position. Progress bar and timer use MA data when Bose reports 0.
+- **groupSideEffects:** After any MA group change, server checks rules and flips HA switches. Currently: turns on `switch.living_room_bass` when Sunroom 300 + Living Room are grouped (bass module is physically wired to Sunroom output).
+- **playRedirects:** Intercepts `/ha/play` by matching `fromQueue`. For Bedroom: switches Bose-Bedroom to AUX1 and plays on Belkin AirPlay queue instead. Also fires `boseSwitchInput` when Bedroom is included into a group via `group-include`.
 
 #### Key Bose API quirk
 `/getZone` sometimes returns empty `senderIPAddress`. Fix: when `senderIPAddress` is empty but members exist, infer master IP = the queried speaker's IP.
@@ -147,24 +135,32 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 ---
 
 ## Speaker List
-| Speaker Name (Bose /info) | IP | MA Queue ID |
-|---|---|---|
-| Bose-Sunroom 300 | 192.168.1.229 | upb0d5cccfcf13 |
-| Bose-Living Room | 192.168.1.171 | up304511da849b |
-| Bose-Kitchen | 192.168.1.185 | upf8369b11ce57 |
-| Bose-Office | 192.168.1.162 | upf45eab9402de |
-| Bose-Bathroom | 192.168.1.120 | upapf4e11ee0766b |
-| Bose-Rosemary | 192.168.1.40 | — |
-| Bose-Joshua | 192.168.1.91 | upb0d5cc50ef39 |
-| Bose-Bedroom | 192.168.1.176 | up04a316bee3e0 |
-| Bose-Dining Room | 192.168.1.55 | up3881d72fc987 |
-| Bose-Patio | 192.168.1.7 | upd8a98bcbc0f6 |
+| Speaker Name (Bose /info) | IP | MA Queue ID | HA Entity ID | Notes |
+|---|---|---|---|---|
+| Bose-Sunroom 300 | 192.168.1.229 | upb0d5cccfcf13 | media_player.bose_sunroom_300_6 | |
+| Bose-Living Room | 192.168.1.171 | up304511da849b | media_player.bose_living_room_6 | |
+| Bose-Kitchen | 192.168.1.185 | upf8369b11ce57 | media_player.bose_kitchen_6 | |
+| Bose-Office | 192.168.1.162 | upf45eab9402de | media_player.bose_office_6 | |
+| Bose-Bathroom | 192.168.1.117 | upf0b5d19709fc | media_player.bose_bathroom_6 | |
+| Bose-Rosemary | 192.168.1.40 | up5cf821f13410 | media_player.bose_rosemary_6 | |
+| Bose-Joshua | 192.168.1.91 | upb0d5cc50ef39 | media_player.bose_joshua_6 | |
+| Bose-Bedroom | 192.168.1.176 | up04a316bee3e0 | media_player.bose_bathroom2* | No native AirPlay — see below |
+| Bose-Dining Room | 192.168.1.55 | up3881d72fc987 | media_player.bose_dining_room_6 | |
+| Bose-Patio | 192.168.1.7 | upd8a98bcbc0f6 | media_player.bose_patio_6 | |
 
-**Note:** Bose-Bedroom has no native AirPlay — uses an external AirPlay→Aux1 adapter. MA targets it via its Bose UPnP queue, not AirPlay.
+**Bose-Bedroom special handling:**
+- Has no native AirPlay. A Belkin AirPlay adapter is connected to AUX1.
+- For Pandora playback: `playRedirects` intercepts the play call, switches Bose to AUX1, and plays on the Belkin's MA queue (`upuuidff970010315bf140af4f0142ff970010`)
+- For MA grouping: `speakerEntities["Bose-Bedroom"]` points to the Belkin's HA entity (`media_player.bose_bathroom2` — misleadingly named, was auto-assigned before renaming)
+- When Bedroom is added to an AIRPLAY group: HA joins the Belkin + Bose switches to AUX1 automatically
+- When Bedroom is master (AUX source): Bose native zoning works normally to add other speakers
 
-Also present in MA (not in this app's speaker list yet):
-- Joshua's WiiM (`up9cb8b438124c`)
+**\* HA entity ID note:** All Bose speakers use `_6` suffix (highest number = last MA entity added). Bathroom uses `_6` not `_4`. The Belkin entity `bose_bathroom2` is a legacy auto-name. Do NOT try to auto-derive entity IDs — verify via `/ha/raw-states`.
+
+Also present in MA:
+- Joshua's WiiM (`up9cb8b438124c`, entity: media_player — verify via /ha/ma-entities)
 - Basement WiiM (`up00226c2e2da2`)
+- Belkin AirPlay (Bedroom): `upuuidff970010315bf140af4f0142ff970010`
 
 ---
 
@@ -199,24 +195,21 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 - **CRLF:** Windows line endings break HA Supervisor YAML parsing — always fix with `sed -i 's/\r//'`
 - **`ha addons` is deprecated** — use `ha apps` instead
 - **network_mode: host** — required for SSDP multicast to work inside Docker
-- **haConfig.json** is git-ignored and NOT deployed by deploy.sh — it lives only on the Pi; update it manually via SSH if needed
+- **haConfig.json** is git-ignored but IS deployed by deploy.sh (not in the exclude list). The Pi's copy is the authoritative one; local edits deploy on next `./deploy.sh`
 - **MA reachable as `localhost`** — MA runs on the same Pi; Docker host networking makes `localhost:8095` work
 
 ---
 
 ## Future TODOs
 
-### Immediate: Radiohead Radio button (IN PROGRESS)
-The Pandora/Radiohead Radio button shows "started ✓" but playback doesn't reliably land on the target speaker. Current attempt: `player_queues/play_media` with `option: 1` (QueueOption enum value for replace+play). If that doesn't work, next approaches:
-- Verify MA interprets `option: 1` as immediate play (not queue-only)
-- Try calling `player_queues/play` after `play_media` (two-step)
-- Use the MA WebSocket API instead of REST for state-aware sequencing
+### Testing (next session)
+Full test pass needed — see CLAUDE.md for planned test cases.
 
-### MA speakerQueues expansion
-Currently only Sunroom and Living Room have MA queue mappings in `haConfig.json`. Need to add mappings for Kitchen, Office, Bathroom, Dining Room, Patio, Joshua, Bedroom so favorites work on all speakers.
+### Pandora station URI
+`library://radio/2` works but needs monitoring. If MA resets Pandora auth, the URI may change. Verify by playing in MA UI and checking `/ha/queues` for the active `current_item.media_item.uri`.
 
-### Bose-Bedroom AirPlay workaround
-Bedroom has no native AirPlay. External AirPlay→Aux1 adapter in use. MA targets it via UPnP (Bose queue). The AirPlay group (`syncgroup_q6vlw5pk`) does NOT include Bedroom.
+### More favorites
+Only Radiohead Radio is in `haConfig.favorites`. Easy to add more once Pandora is stable.
 
 ### WiiM speaker support
 WiiM devices are excellent UPnP renderers — NAS/UPnP playback stack works unchanged. What needs work:
@@ -251,3 +244,11 @@ Post-May-6 stretch goal.
 | `music/play_media` MA command | MA accepted it but nothing played — reverted to `player_queues/play_media` |
 | Separate `player_queues/play` after `play_media` | Resumed "active" queue (Living Room) not target queue — wrong speaker played |
 | Hardcoded speaker IPs | IPs change via DHCP; switched to name-based identification from Bose `/info` API |
+| `option: 1` (int) for play_media | MA requires string: `'replace'` not integer. Int caused "Internal server error" |
+| `uri` param for play_media | MA requires `media` not `uri`. Caused silent failure then "Internal server error" |
+| MA REST API for grouping | No grouping commands in MA REST API. Must use HA `media_player.join`/`unjoin` |
+| `_music_assistant` entity suffix | MA entities use numeric suffix (`_6`), not `_music_assistant`. Auto-derivation doesn't work |
+| `media_player.bose_bathroom_4` for Bathroom | Wrong — it's `_6`. HA returns 200 for join regardless, masking the error |
+| `upapf4e11ee0766b` for Bathroom queue | Wrong MAC-derived ID — actual MA queue is `upf0b5d19709fc` |
+| `upcc4b73fe2466` for Belkin queue | This queue disappeared from MA — correct Belkin queue is `upuuidff970010315bf140af4f0142ff970010` |
+| `members[0] === entity_id` leader detection | Breaks for Joshua/Rosemary where leader lists only members (not self). Use "has other known entities" + dedup instead |

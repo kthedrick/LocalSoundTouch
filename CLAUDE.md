@@ -4,51 +4,41 @@ See CONTEXT.md for full architecture, technical decisions, and speaker/NAS detai
 
 ---
 
-## NEXT SESSION: MA Speaker Grouping via HA REST API
+## MA Speaker Grouping — Status & Entity ID Reference
 
-**Status:** The MA REST API (port 8095) is queue-control only. Grouping/ungrouping speakers requires HA's `media_player.join` / `media_player.unjoin` services via HA's REST API at port 8123.
+**Status:** Fully working. MA grouping uses HA `media_player.join`/`unjoin` via HA REST API (port 8123). `/ha/group-state` polls HA entity states to detect active groups and merge them into the UI zone cards.
 
-**What's needed:**
-1. HA long-lived access token (created in HA Profile → Long-Lived Access Tokens — different from the MA token)
-2. Add to `haConfig.json` on the Pi:
-   ```json
-   "haUrl": "http://homeassistant:8123",
-   "haToken": "<HA long-lived token>"
-   ```
-3. Implement `haPost(path, body)` in haHandler.js (same pattern as `maPost`)
-4. Update `/ha/group-include` to call:
-   ```
-   POST /api/services/media_player/join
-   { "entity_id": "media_player.bose_sunroom_300_music_assistant",
-     "group_members": ["media_player.bose_living_room_music_assistant"] }
-   ```
-5. Update `/ha/group-remove` to call:
-   ```
-   POST /api/services/media_player/unjoin
-   { "entity_id": "media_player.bose_living_room_music_assistant" }
-   ```
+### HA Entity ID Quirks (read this before touching haConfig.json)
 
-**Entity ID derivation** (auto, no manual config needed):
-- "Bose-Sunroom 300" → `media_player.bose_sunroom_300_music_assistant`
-- Rule: lowercase, replace spaces/hyphens with underscores, append `_music_assistant`
-- Use MA entities (not SoundTouchPlus entities which are prefixed `stp_`)
+Entity IDs are NOT auto-derivable — MA assigns a numeric suffix and the numbers are not consistent. **Always verify via `http://homeassistant:3000/ha/raw-states` or `/ha/ma-entities`.**
 
-**Key caveats from MA docs:**
-- Only Temporary Sync Groups support dynamic join/unjoin via HA actions
-- AirPlay groups keep playing seamlessly when a new member joins (no pause)
-- MA 2.7.x has a bug where the MA UI breaks dynamic member removal — use HA `media_player.unjoin` as workaround (our approach)
-- Always target `*_music_assistant` entities, never `stp_*` entities
-- `media_player.join`'s `group_members` field lists players being ADDED, not the full list
+| Speaker | HA Entity | Notes |
+|---------|-----------|-------|
+| Bose-Sunroom 300 | `media_player.bose_sunroom_300_6` | |
+| Bose-Living Room | `media_player.bose_living_room_6` | |
+| Bose-Kitchen | `media_player.bose_kitchen_6` | |
+| Bose-Office | `media_player.bose_office_6` | |
+| Bose-Bathroom | `media_player.bose_bathroom_6` | Was guessed as `_4` initially — it's `_6` |
+| Bose-Dining Room | `media_player.bose_dining_room_6` | |
+| Bose-Patio | `media_player.bose_patio_6` | |
+| Bose-Joshua | `media_player.bose_joshua_6` | |
+| Bose-Rosemary | `media_player.bose_rosemary_6` | |
+| Bose-Bedroom | `media_player.bose_bathroom2` | **This is the Belkin AirPlay adapter, NOT the Bose-Bedroom speaker.** Bose-Bedroom has no native AirPlay so cannot join AirPlay sync groups. The Belkin (on AUX1) is used for MA grouping. It was auto-named `bose_bathroom2` by HA before renaming — the name is misleading. |
 
-**UI problem still open:** When speakers are grouped via MA/HA, our app doesn't show them as grouped — we build zones from Bose's `/getZone` which knows nothing about MA groups. Need to either poll HA entity state for group_members or track MA group state in the server. Not solved yet.
+### HA group_members behavior (important for /ha/group-state logic)
 
-**UI requirements for MA groups (to discuss next session):**
-- Temporary sync groups MUST appear in our UI as a grouped zone (same as Bose zones)
-- User must be able to break the group (unjoin) from the UI even if one or both speakers are off/standby
-- This may require significant UI changes — current zone building assumes speakers are reachable and Bose-zone-aware
-- Likely approach: poll HA entity state for `group_members` attribute on MA entities, merge with Bose zone data, surface a "break group" button that calls `media_player.unjoin` regardless of speaker power state
+MA/HA `group_members` attribute format is inconsistent across entity types:
+- **Leader** lists only the **members** (not itself): `["media_player.bose_rosemary_6"]` on Joshua
+- **Member** lists only **itself**: `["media_player.bose_rosemary_6"]` on Rosemary  
+- **Some leaders** include themselves: `["media_player.bose_bathroom_6", "media_player.bose_bathroom2"]` on Bathroom
 
-**Current app-side code for Include (app2.jsx):** when `np.source === 'AIRPLAY'` and both `masterQueueId` and `targetQueueId` are known, calls `POST /ha/group-include { masterId, playerId }`. This is correct — just the server-side needs to be updated to use HA API.
+The `/ha/group-state` handler uses: "any entity that has OTHER known entities in its group_members is a leader" + deduplication by sorted member set. Do not revert to the `members[0] === entity_id` check — it breaks for the Joshua/Rosemary pattern.
+
+### Bedroom special handling (playRedirects)
+- `speakerQueues["Bose-Bedroom"]` = Bose-Bedroom's own queue (`up04a316bee3e0`) — used as the intercept key
+- `playRedirects` catches this queue on `/ha/play` and redirects to Belkin queue (`upcc4b73fe2466`) + switches Bose to AUX1
+- `speakerEntities["Bose-Bedroom"]` = Belkin entity (`bose_bathroom2`) — used for MA grouping
+- When included in a group, `group-include` also fires `boseSwitchInput` to switch the Bose to AUX1
 
 ---
 

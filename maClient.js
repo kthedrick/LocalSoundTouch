@@ -66,6 +66,6 @@ const resumeQueue  = (queueId)              => maPost('player_queues/play',     
 const nextTrack    = (queueId)              => maPost('player_queues/next',       { queue_id: queueId });
 const prevTrack    = (queueId)              => maPost('player_queues/previous',   { queue_id: queueId });
 const getAllQueues  = ()                     => maPost('player_queues/all',        {});
-const playMedia = (queueId, uri) => maPost('player_queues/play_media', { queue_id: queueId, media: uri, option: 'play' });
+const playMedia = (queueId, uri) => maPost('player_queues/play_media', { queue_id: queueId, media: uri, option: 'replace' });
 
 module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, reloadConfig, getConfig };

@@ -313,14 +313,22 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, otherSpeakers, speakerData, groups, onOpenNas, onMaStop, haConfig, onPlayFavorite }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onMaStop, haConfig, onPlayFavorite, maTrack }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
+  // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
+  const isAirplay  = np?.source === 'AIRPLAY';
+  const isMASource = isAirplay || (np?.source === 'AUX' && !!maTrack);
+  const effectiveArt      = np?.art    || maTrack?.art    || null;
+  const effectiveTrack    = np?.track  || maTrack?.track  || null;
+  const effectiveArtist   = np?.artist || maTrack?.artist || null;
+  const effectiveDuration = (np?.duration > 0 ? np.duration : null) ?? (maTrack?.duration || 0);
+  const effectivePosition = (np?.position > 0 ? np.position : null) ?? (maTrack?.position || 0);
   const isStandby   = !np || np.source === 'STANDBY';
   const isPlaying   = master?.playStatus === 'PLAY_STATE';
   const hasContent  = !isStandby && (np?.track || np?.stationName || np?.source);
 
-  const [position, setPosition] = useState(np?.position || 0);
+  const [position, setPosition] = useState(effectivePosition);
   const [artModal, setArtModal] = useState(false);
   const [favStatus, setFavStatus] = useState(null);
   const timerRef = useRef(null);
@@ -337,23 +345,23 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
     setTimeout(() => setFavStatus(null), 6000);
   };
 
-  useEffect(() => { setPosition(np?.position || 0); }, [np?.track, np?.stationName, np?.source]);
+  useEffect(() => { setPosition(effectivePosition); }, [effectiveTrack, np?.stationName, np?.source]);
 
   useEffect(() => {
     clearInterval(timerRef.current);
-    if (isPlaying && np?.duration > 0) {
+    if (isPlaying && effectiveDuration > 0) {
       timerRef.current = setInterval(() => setPosition(p => p + 1), 1000);
     }
     return () => clearInterval(timerRef.current);
-  }, [isPlaying, np?.duration, np?.track]);
+  }, [isPlaying, effectiveDuration, effectiveTrack]);
 
   const formatTime = (s) => {
     const n = Math.max(0, Math.floor(s));
     return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
   };
 
-  const pos  = Math.min(position, np?.duration || 0);
-  const pct  = np?.duration > 0 ? Math.round(pos / np.duration * 100) : 0;
+  const pos  = Math.min(position, effectiveDuration);
+  const pct  = effectiveDuration > 0 ? Math.round(pos / effectiveDuration * 100) : 0;
 
   return (
     <div className="bg-slate-800 rounded-2xl overflow-hidden border border-slate-700">
@@ -362,8 +370,8 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
       {hasContent && (
         <div className="p-4 border-b border-slate-700">
           <div className="flex items-start gap-3">
-            {np.art && np.art.startsWith('http') && (
-              <img src={np.art} key={np.art} alt="Art"
+            {effectiveArt && effectiveArt.startsWith('http') && (
+              <img src={effectiveArt} key={effectiveArt} alt="Art"
                    onClick={() => setArtModal(true)}
                    className="w-16 h-16 rounded-lg object-cover flex-shrink-0 cursor-pointer hover:opacity-80 transition-opacity"/>
             )}
@@ -374,7 +382,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
                     {np.source}
                   </span>
                 )}
-                {np.sourceAccount && (
+                {np.sourceAccount && np.sourceAccount !== 'AirPlay2DefaultUserName' && (
                   <span className="text-slate-500 text-xs truncate">{np.sourceAccount}</span>
                 )}
               </div>
@@ -382,10 +390,10 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
                 <p className="text-slate-400 text-xs truncate">{np.stationName}</p>
               )}
               <p className="text-white font-semibold truncate leading-tight">
-                {np.track || '—'}
+                {effectiveTrack || '—'}
               </p>
-              {np.artist && (
-                <p className="text-slate-300 text-sm truncate">{np.artist}</p>
+              {effectiveArtist && (
+                <p className="text-slate-300 text-sm truncate">{effectiveArtist}</p>
               )}
             </div>
 
@@ -407,7 +415,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
           </div>
 
           {/* Progress bar */}
-          {np.duration > 0 && (
+          {effectiveDuration > 0 && (
             <div className="flex items-center gap-2 mt-2.5">
               <span className="text-slate-500 text-xs tabular-nums w-10 text-right">{formatTime(pos)}</span>
               <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
@@ -415,7 +423,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
                      style={{ width: pct + '%' }}/>
               </div>
               <span className="text-slate-500 text-xs tabular-nums w-10">
-                -{formatTime((np.duration || 0) - pos)}
+                -{formatTime(effectiveDuration - pos)}
               </span>
             </div>
           )}
@@ -484,7 +492,13 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
 
                   {/* Remove button */}
                   {group.speakers.length > 1 && (
-                    <button onClick={() => onRemoveFromGroup(group.masterIp, spk.ip)}
+                    <button onClick={() => {
+                      if (group.maMembers?.includes(spk.name)) {
+                        onMaGroupRemove(spk.name);
+                      } else {
+                        onRemoveFromGroup(group.masterIp, spk.ip);
+                      }
+                    }}
                       className="p-2 bg-slate-600 hover:bg-red-600 text-white rounded transition flex-shrink-0 flex items-center justify-center w-8 h-8">
                       <span className="text-xl leading-none">×</span>
                     </button>
@@ -566,12 +580,12 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
                   body: JSON.stringify({ source: np?.source, masterName: master?.name, spkName: spk.name, masterQueueId, targetQueueId }),
                 });
                 if (np?.source === 'AIRPLAY') {
-                  // MA/AirPlay session: add target to master's MA group via set_members
-                  if (masterQueueId && targetQueueId) {
+                  // MA/AirPlay: join via HA media_player.join using speaker names
+                  if (master?.name && spk.name) {
                     fetch('/ha/group-include', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ masterId: masterQueueId, playerId: targetQueueId }),
+                      body: JSON.stringify({ masterName: master.name, speakerName: spk.name }),
                     });
                     return;
                   }
@@ -608,10 +622,10 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
       </div>
 
       {/* Album art modal */}
-      {artModal && np?.art && (
+      {artModal && effectiveArt && (
         <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-50"
              onClick={() => setArtModal(false)}>
-          <img src={np.art} alt="Album art"
+          <img src={effectiveArt} alt="Album art"
                className="rounded-xl shadow-2xl object-contain"
                style={{ width: '70vmin', height: '70vmin' }}/>
         </div>
@@ -628,6 +642,8 @@ function AllSpeakersView() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [nasBrowser, setNasBrowser] = useState(null); // { ip, name }
   const [haConfig, setHaConfig] = useState(null);
+  const [maGroups, setMaGroups] = useState([]);
+  const [maTrackData, setMaTrackData] = useState({}); // speakerName → { track, artist, art }
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
 
@@ -646,6 +662,12 @@ function AllSpeakersView() {
     return SPEAKERS;
   };
 
+  const fetchMaGroups = () => {
+    fetch('/ha/group-state').then(r => r.json()).then(d => {
+      if (d.ok) setMaGroups(d.groups || []);
+    }).catch(() => {});
+  };
+
   const pollAll = async (list = speakers) => {
     const speakerList = list.length ? list : SPEAKERS;
     const promises = speakerList.map(async (spk) => {
@@ -653,6 +675,7 @@ function AllSpeakersView() {
       setSpeakerData(prev => ({ ...prev, [data.ip]: data }));
     });
     await Promise.all(promises);
+    fetchMaGroups();
     setLastUpdated(new Date());
   };
 
@@ -665,6 +688,39 @@ function AllSpeakersView() {
 
     load();
     fetch('/ha/config').then(r => r.json()).then(setHaConfig).catch(() => {});
+    fetchMaGroups();
+  }, []);
+
+  // Fetch MA track metadata for AIRPLAY speakers (and AUX-redirect speakers) whenever speaker data updates
+  useEffect(() => {
+    if (!haConfig) return;
+    // Build fromQueue→toQueue map for play redirects
+    const redirectMap = {};
+    (haConfig.playRedirects || []).forEach(r => { redirectMap[r.fromQueue] = r.toQueue; });
+
+    Object.values(speakerData).forEach(spk => {
+      const src = spk?.nowPlaying?.source;
+      if (!spk?.name || (src !== 'AIRPLAY' && src !== 'AUX')) return;
+      const speakerQueue = haConfig.speakerQueues?.[spk.name];
+      if (!speakerQueue) return;
+      // For AUX: only poll if this speaker has a play redirect (i.e. MA is playing via a redirected queue)
+      const queueId = src === 'AUX' ? redirectMap[speakerQueue] : speakerQueue;
+      if (!queueId) return;
+      fetch('/ha/queue-now-playing?queueId=' + queueId)
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok && (d.track || d.art)) {
+            setMaTrackData(prev => ({ ...prev, [spk.name]: d }));
+          } else if (src === 'AUX') {
+            // AUX but nothing playing in MA — clear any stale track data
+            setMaTrackData(prev => { const next = { ...prev }; delete next[spk.name]; return next; });
+          }
+        })
+        .catch(() => {});
+    });
+  }, [speakerData, haConfig]);
+
+  useEffect(() => {
     const interval = setInterval(async () => {
       const discovered = await fetchSpeakers();
       await pollAll(discovered);
@@ -677,7 +733,11 @@ function AllSpeakersView() {
 
     const speakerList = speakers.length ? speakers : SPEAKERS;
 
-    // Collect zones: masterIp → Set of all IPs in that zone
+    // Build name→IP lookup
+    const nameToIp = {};
+    speakerList.forEach(s => { nameToIp[s.name] = s.ip; });
+
+    // Collect Bose zones: masterIp → Set of all IPs in that zone
     const zones = {};
     speakerList.forEach(spk => {
       const z = speakerData[spk.ip]?.zoneInfo;
@@ -705,6 +765,26 @@ function AllSpeakersView() {
         result.push({ id: spk.ip, masterIp: spk.ip, speakers: [speakerData[spk.ip]] });
     });
 
+    // Merge MA groups: add MA members into leader's card, hide their standalone cards
+    const maGroupedIps = new Set();
+    maGroups.forEach(({ leader, members }) => {
+      const leaderIp = nameToIp[leader];
+      const leaderGroup = result.find(g => g.masterIp === leaderIp);
+      if (!leaderGroup) return;
+      const maMembers = members
+        .map(name => speakerData[nameToIp[name]])
+        .filter(Boolean);
+      maMembers.forEach(m => {
+        maGroupedIps.add(m.ip);
+        if (!leaderGroup.speakers.find(s => s.ip === m.ip))
+          leaderGroup.speakers.push(m);
+      });
+      leaderGroup.maMembers = members; // track which speakers are MA (not Bose) members
+    });
+
+    // Remove any card whose master IP is an MA group member (absorbed into leader)
+    const merged = result.filter(g => !maGroupedIps.has(g.masterIp));
+
     // Sort: Sunroom first, then playing first, then paused/stopped, then standby, then unreachable
     const rank = g => {
       const m = g.speakers.find(s => s.ip === g.masterIp) || g.speakers[0];
@@ -713,7 +793,7 @@ function AllSpeakersView() {
       if (m?.playStatus === 'PLAY_STATE') return 0;
       return 1;
     };
-    result.sort((a, b) => {
+    merged.sort((a, b) => {
       const aHasSunroom = a.speakers.some(s => s.name === 'Bose-Sunroom 300');
       const bHasSunroom = b.speakers.some(s => s.name === 'Bose-Sunroom 300');
       if (aHasSunroom && !bHasSunroom) return -1;
@@ -721,8 +801,8 @@ function AllSpeakersView() {
       return rank(a) - rank(b);
     });
 
-    return result;
-  }, [speakerData]);
+    return merged;
+  }, [speakerData, maGroups]);
 
   const getDeviceId = async (ip) => {
     if (deviceIds.current[ip]) return deviceIds.current[ip];
@@ -858,15 +938,28 @@ function AllSpeakersView() {
     // When powering off a speaker playing via MA/AirPlay, stop+clear MA queues so it won't auto-restart
     if (key === 'POWER') {
       const src = speakerData[ip]?.nowPlaying?.source;
-      if (src === 'AIRPLAY') {
-        const name = speakerData[ip]?.name;
-        const speakerQueueId = name && haConfig?.speakerQueues?.[name];
-        const airplayGroupId = haConfig?.queues?.airplayGroup;
-        const queuesToKill = [...new Set([speakerQueueId, airplayGroupId].filter(Boolean))];
-        queuesToKill.forEach(queueId => {
-          fetch('/ha/stop',  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
-          fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
-        });
+      const name = speakerData[ip]?.name;
+      const speakerQueue = name && haConfig?.speakerQueues?.[name];
+      const redirectMap = {};
+      (haConfig?.playRedirects || []).forEach(r => { redirectMap[r.fromQueue] = r; });
+      const isAuxRedirect = src === 'AUX' && speakerQueue && redirectMap[speakerQueue];
+
+      if (src === 'AIRPLAY' || isAuxRedirect) {
+        if (src === 'AIRPLAY') {
+          // Stop+clear MA queues so HA won't auto-restart
+          const airplayGroupId = haConfig?.queues?.airplayGroup;
+          const queuesToKill = [...new Set([speakerQueue, airplayGroupId].filter(Boolean))];
+          queuesToKill.forEach(queueId => {
+            fetch('/ha/stop',  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
+            fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
+          });
+        }
+        // Unjoin from MA group so the UI card separates
+        if (name) {
+          fetch('/ha/group-remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ speakerName: name }) })
+            .then(() => setTimeout(() => fetchMaGroups(), 1500))
+            .catch(() => {});
+        }
       }
     }
     // When playing via UPnP, NEXT/PREV must go through our queue, not the Bose key API
@@ -881,9 +974,15 @@ function AllSpeakersView() {
         });
         return;
       }
-      if (src === 'AIRPLAY') {
+      if (src === 'AIRPLAY' || src === 'AUX') {
         const name = speakerData[ip]?.name;
-        const queueId = (name && haConfig?.speakerQueues?.[name]) || haConfig?.queues?.airplayGroup;
+        const speakerQueue = name && haConfig?.speakerQueues?.[name];
+        // For AUX redirect, skip on the redirected (Belkin) queue; for AIRPLAY use speaker/group queue
+        const redirectMap = {};
+        (haConfig?.playRedirects || []).forEach(r => { redirectMap[r.fromQueue] = r.toQueue; });
+        const queueId = (src === 'AUX' && speakerQueue && redirectMap[speakerQueue])
+          || speakerQueue
+          || haConfig?.queues?.airplayGroup;
         if (queueId) {
           fetch(key === 'NEXT_TRACK' ? '/ha/next' : '/ha/prev', {
             method: 'POST',
@@ -898,6 +997,14 @@ function AllSpeakersView() {
     setTimeout(() => apiPost(ip, '/key', '<key state="release" sender="Gabbo">' + key + '</key>'), 100);
     if (key === 'PLAY_PAUSE' || key.startsWith('PRESET_')) setTimeout(pollAll, 800);
     if (key === 'POWER') setTimeout(pollAll, 1500);
+  };
+
+  const onMaGroupRemove = (speakerName) => {
+    fetch('/ha/group-remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speakerName }),
+    }).then(() => setTimeout(() => { fetchMaGroups(); pollAll(); }, 1000));
   };
 
   const onMaStop = (speakerIp) => {
@@ -980,8 +1087,10 @@ function AllSpeakersView() {
                 groups={groups}
                 onOpenNas={() => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp })}
                 onMaStop={onMaStop}
+                onMaGroupRemove={onMaGroupRemove}
                 haConfig={haConfig}
                 onPlayFavorite={playFavorite}
+                maTrack={maTrackData[master?.name]}
               />
             );
           })}

@@ -1,6 +1,67 @@
 // HTTP handler for /ha/* routes — Music Assistant integration
 
+const http = require('http');
 const { stopQueue, clearQueue, getAllPlayers, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
+
+// Look up HA media_player entity ID from Bose speaker name via haConfig.speakerEntities
+function speakerNameToEntityId(name) {
+  const cfg = getConfig();
+  return cfg.speakerEntities?.[name] || null;
+}
+
+// GET request to HA REST API
+function haGet(path) {
+  const cfg = getConfig();
+  const haUrl = new URL(cfg.haUrl || 'http://homeassistant:8123');
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: haUrl.hostname,
+      port: parseInt(haUrl.port) || 8123,
+      path,
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + cfg.haToken },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { resolve(data); }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Call HA REST API service
+function haServicePost(path, body) {
+  const cfg = getConfig();
+  const haUrl = new URL(cfg.haUrl || 'http://homeassistant:8123');
+  const bodyStr = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: haUrl.hostname,
+      port: parseInt(haUrl.port) || 8123,
+      path,
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + cfg.haToken,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch (e) { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -16,13 +77,70 @@ function readBody(req) {
 function ok(res, data)  { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, ...data })); }
 function err(res, msg)  { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: msg })); }
 
+// Switch a Bose speaker to a specific input via its local HTTP API
+function boseSwitchInput(ip, source, sourceAccount = '') {
+  const body = `<ContentItem source="${source}" sourceAccount="${sourceAccount}" type="ad" location="" isPresetable="false"/>`;
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: ip, port: 8090, path: '/select', method: 'POST',
+      headers: { 'Content-Type': 'application/xml', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
+    });
+    req.on('error', reject);
+    req.write(body); req.end();
+  });
+}
+
+// Apply groupSideEffects rules from haConfig after any group change.
+// Checks current HA group state and flips HA switches as configured.
+async function applyGroupSideEffects(involvedSpeakers = null) {
+  const cfg = getConfig();
+  const allRules = cfg.groupSideEffects || [];
+  if (allRules.length === 0) return;
+  // Only evaluate rules that include at least one of the speakers involved in the change
+  const rules = involvedSpeakers
+    ? allRules.filter(r => r.speakers.some(s => involvedSpeakers.includes(s)))
+    : allRules;
+  if (rules.length === 0) return;
+
+  try {
+    const entityMap = cfg.speakerEntities || {};
+    const reverseMap = {};
+    for (const [name, entityId] of Object.entries(entityMap)) reverseMap[entityId] = name;
+
+    const allStates = await haGet('/api/states');
+    const entityIds = new Set(Object.values(entityMap));
+    const maStates = Array.isArray(allStates) ? allStates.filter(s => entityIds.has(s.entity_id)) : [];
+
+    // Build current groups as sets of speaker names
+    const currentGroups = [];
+    for (const state of maStates) {
+      const members = state.attributes?.group_members || [];
+      if (members[0] !== state.entity_id) continue;
+      const names = members.map(id => reverseMap[id]).filter(Boolean);
+      if (names.length > 1) currentGroups.push(new Set(names));
+    }
+
+    for (const rule of rules) {
+      const grouped = currentGroups.some(g => rule.speakers.every(s => g.has(s)));
+      const desiredState = grouped ? rule.onGrouped : rule.onSeparated;
+      const service = desiredState === 'on' ? 'turn_on' : 'turn_off';
+      await haServicePost(`/api/services/switch/${service}`, { entity_id: rule.haSwitch });
+      console.log('[sideEffect] %s → %s (grouped=%s)', rule.haSwitch, desiredState, grouped);
+    }
+  } catch (e) {
+    console.error('[applyGroupSideEffects] error:', e.message);
+  }
+}
+
 async function handleHa(req, res) {
   const url = req.url;
 
   // GET /ha/config — return haConfig (no token) for the UI
   if (url === '/ha/config' && req.method === 'GET') {
     const cfg = getConfig();
-    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, favorites: cfg.favorites || [] };
+    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [] };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(safe));
     return;
@@ -105,8 +223,23 @@ async function handleHa(req, res) {
   if (url === '/ha/play' && req.method === 'POST') {
     const body = await readBody(req);
     try {
-      const result = await playMedia(body.queueId, body.uri);
-      console.log('[ha/play] queueId=%s uri=%s result=%j', body.queueId, body.uri, result);
+      const cfg = getConfig();
+      let { queueId, uri } = body;
+
+      // Check playRedirects: intercept play for speakers with special routing
+      const redirect = (cfg.playRedirects || []).find(r => r.fromQueue === queueId);
+      if (redirect) {
+        if (redirect.boseSwitchInput) {
+          const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
+          console.log('[ha/play] redirect: switching %s to input %s', ip, source);
+          await boseSwitchInput(ip, source, sourceAccount);
+        }
+        queueId = redirect.toQueue;
+        console.log('[ha/play] redirect: playing on %s instead', queueId);
+      }
+
+      const result = await playMedia(queueId, uri);
+      console.log('[ha/play] queueId=%s uri=%s result=%j', queueId, uri, result);
       ok(res, { result });
     } catch (e) {
       console.error('[ha/play] error:', e.message);
@@ -139,6 +272,27 @@ async function handleHa(req, res) {
     return;
   }
 
+  // GET /ha/queue-now-playing?queueId=... — return current track info from MA queue
+  if (url.startsWith('/ha/queue-now-playing') && req.method === 'GET') {
+    const queueId = new URL('http://x' + url).searchParams.get('queueId');
+    try {
+      const queues = await getAllQueues();
+      const queue = Array.isArray(queues) ? queues.find(q => q.queue_id === queueId) : null;
+      const item = queue?.current_item;
+      const meta = item?.streamdetails?.stream_metadata;
+      ok(res, {
+        track:    meta?.title  || item?.name || null,
+        artist:   meta?.artist || null,
+        album:    meta?.album  || null,
+        art:      meta?.image_url || item?.image?.path || null,
+        uri:      item?.media_item?.uri || null,
+        duration: item?.duration || 0,
+        position: queue?.elapsed_time || 0,
+      });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   // GET /ha/queue-uri?queueId=... — return current playing URI for a queue
   if (url.startsWith('/ha/queue-uri') && req.method === 'GET') {
     const queueId = new URL('http://x' + url).searchParams.get('queueId');
@@ -159,39 +313,131 @@ async function handleHa(req, res) {
     return;
   }
 
-  // POST /ha/group-include — add a player to the master's MA group { masterId, playerId }
+  // POST /ha/group-include — join a speaker into master's MA group { masterName, speakerName }
   if (url === '/ha/group-include' && req.method === 'POST') {
     const body = await readBody(req);
+    const masterEntity = speakerNameToEntityId(body.masterName);
+    const targetEntity = speakerNameToEntityId(body.speakerName);
+    if (!masterEntity || !targetEntity) {
+      err(res, `No HA entity mapped for: ${!masterEntity ? body.masterName : body.speakerName}`);
+      return;
+    }
     try {
-      const players = await getAllPlayers();
-      const master = Array.isArray(players) ? players.find(p => p.player_id === body.masterId) : null;
-      const current = master?.group_members || [body.masterId];
-      const members = current.includes(body.playerId) ? current : [...current, body.playerId];
-      const result = await setMembers(body.masterId, members);
-      console.log('[ha/group-include] %s + %s members=%j result=%j', body.masterId, body.playerId, members, result);
-      ok(res, { result, members });
+      const result = await haServicePost('/api/services/media_player/join', {
+        entity_id: masterEntity,
+        group_members: [targetEntity],
+      });
+      console.log('[ha/group-include] %s + %s → status=%d', masterEntity, targetEntity, result.status);
+      ok(res, { status: result.status });
     } catch (e) {
       console.error('[ha/group-include] error:', e.message);
       err(res, e.message);
+      return;
     }
+    // If this speaker has a Bose input redirect (e.g. Bedroom → AUX1 for Belkin), switch it now
+    const cfg2 = getConfig();
+    const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === body.speakerName && r.boseSwitchInput);
+    if (redirect) {
+      const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
+      boseSwitchInput(ip, source, sourceAccount)
+        .then(() => console.log('[group-include] switched %s to %s', ip, source))
+        .catch(e => console.error('[group-include] boseSwitchInput error:', e.message));
+    }
+    // Fire-and-forget: apply side effects after group state settles
+    setTimeout(() => applyGroupSideEffects([body.masterName, body.speakerName]), 1500);
     return;
   }
 
-  // POST /ha/group-remove — remove a player from the master's MA group { masterId, playerId }
+  // POST /ha/group-remove — unjoin a speaker from its MA group { speakerName }
   if (url === '/ha/group-remove' && req.method === 'POST') {
     const body = await readBody(req);
+    const targetEntity = speakerNameToEntityId(body.speakerName);
+    if (!targetEntity) {
+      err(res, `No HA entity mapped for: ${body.speakerName}`);
+      return;
+    }
     try {
-      const players = await getAllPlayers();
-      const master = Array.isArray(players) ? players.find(p => p.player_id === body.masterId) : null;
-      const current = master?.group_members || [body.masterId];
-      const members = current.filter(id => id !== body.playerId);
-      const result = await setMembers(body.masterId, members.length ? members : [body.masterId]);
-      console.log('[ha/group-remove] %s - %s members=%j result=%j', body.masterId, body.playerId, members, result);
-      ok(res, { result, members });
+      const result = await haServicePost('/api/services/media_player/unjoin', {
+        entity_id: targetEntity,
+      });
+      console.log('[ha/group-remove] %s → status=%d', targetEntity, result.status);
+      ok(res, { status: result.status });
     } catch (e) {
       console.error('[ha/group-remove] error:', e.message);
       err(res, e.message);
+      return;
     }
+    setTimeout(() => applyGroupSideEffects([body.speakerName]), 1500);
+    return;
+  }
+
+  // GET /ha/group-state — return active MA speaker groups from HA entity state
+  if (url === '/ha/group-state' && req.method === 'GET') {
+    try {
+      const cfg = getConfig();
+      const entityMap = cfg.speakerEntities || {};
+      // Build reverse map: entity_id → speaker_name
+      const reverseMap = {};
+      for (const [name, entityId] of Object.entries(entityMap)) reverseMap[entityId] = name;
+
+      // Fetch all HA states and filter to our MA entities
+      const allStates = await haGet('/api/states');
+      const entityIds = new Set(Object.values(entityMap));
+      const maStates = Array.isArray(allStates)
+        ? allStates.filter(s => entityIds.has(s.entity_id))
+        : [];
+
+      // Find groups: the leader entity lists other known entities in its group_members.
+      // MA/HA behavior varies — sometimes leader includes itself in the list, sometimes not.
+      // Use deduplication by member set to avoid symmetric duplicates.
+      const groups = [];
+      const seenKeys = new Set();
+      for (const state of maStates) {
+        const members = state.attributes?.group_members || [];
+        const otherMembers = members.filter(id => id !== state.entity_id && reverseMap[id]);
+        if (otherMembers.length === 0) continue;
+        const leaderName = reverseMap[state.entity_id];
+        if (!leaderName) continue;
+        const memberNames = otherMembers.map(id => reverseMap[id]).filter(Boolean);
+        const key = [leaderName, ...memberNames].sort().join('\0');
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        groups.push({ leader: leaderName, members: memberNames });
+      }
+      ok(res, { groups });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/ma-entities — list HA media_player entities (filtered to likely MA ones)
+  if (url === '/ha/ma-entities' && req.method === 'GET') {
+    try {
+      const allStates = await haGet('/api/states');
+      const players = Array.isArray(allStates)
+        ? allStates
+            .filter(s => s.entity_id.startsWith('media_player.') && !s.entity_id.includes('stp_'))
+            .map(s => ({ entity_id: s.entity_id, name: s.attributes?.friendly_name || s.entity_id }))
+            .sort((a, b) => a.entity_id.localeCompare(b.entity_id))
+        : [];
+      ok(res, { players });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/raw-states — dump raw HA state for all speakerEntities (debug)
+  if (url === '/ha/raw-states' && req.method === 'GET') {
+    try {
+      const cfg = getConfig();
+      const entityIds = new Set(Object.values(cfg.speakerEntities || {}));
+      const allStates = await haGet('/api/states');
+      const relevant = Array.isArray(allStates)
+        ? allStates
+            .filter(s => entityIds.has(s.entity_id))
+            .map(s => ({ entity_id: s.entity_id, state: s.state, group_members: s.attributes?.group_members || [] }))
+        : [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(relevant, null, 2));
+    } catch (e) { err(res, e.message); }
     return;
   }
 
