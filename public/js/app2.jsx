@@ -634,6 +634,50 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
   );
 }
 
+// ── TVCard ────────────────────────────────────────────────────────────────────
+function TVCard({ tvState }) {
+  if (!tvState || !tvState.on) return null;
+  const { appleTV, appName } = tvState;
+  const isApple = !!appleTV;
+
+  return (
+    <div className="bg-slate-800 rounded-2xl p-4 shadow-xl border border-slate-700 mb-3">
+      <div className="flex items-center gap-3">
+        {isApple && appleTV.art ? (
+          <img src={appleTV.art} alt="art"
+               className="w-16 h-16 rounded-lg object-cover flex-shrink-0" />
+        ) : (
+          <div className="w-16 h-16 rounded-lg bg-slate-700 flex items-center justify-center flex-shrink-0 text-2xl">
+            {isApple ? '🍎' : '📺'}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-slate-400 text-xs font-medium">
+              {isApple ? 'Apple TV' : 'Sunroom TV'}
+            </span>
+          </div>
+          {isApple ? (
+            <>
+              {appleTV.title && (
+                <p className="text-white font-semibold text-sm leading-tight truncate">{appleTV.title}</p>
+              )}
+              {appleTV.artist && (
+                <p className="text-slate-400 text-xs truncate">{appleTV.artist}</p>
+              )}
+              {!appleTV.title && appleTV.app && (
+                <p className="text-slate-300 text-sm truncate">{appleTV.app}</p>
+              )}
+            </>
+          ) : (
+            <p className="text-slate-300 text-sm truncate">{appName || tvState.source || 'On'}</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── AllSpeakersView ───────────────────────────────────────────────────────────
 function AllSpeakersView() {
   const [speakerData, setSpeakerData] = useState({});
@@ -644,6 +688,7 @@ function AllSpeakersView() {
   const [haConfig, setHaConfig] = useState(null);
   const [maGroups, setMaGroups] = useState([]);
   const [maTrackData, setMaTrackData] = useState({}); // speakerName → { track, artist, art }
+  const [tvState, setTvState] = useState(null);
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
 
@@ -725,6 +770,15 @@ function AllSpeakersView() {
       const discovered = await fetchSpeakers();
       await pollAll(discovered);
     }, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Poll TV state every 10s
+  useEffect(() => {
+    const fetchTv = () =>
+      fetch('/ha/tv-state').then(r => r.json()).then(d => { if (d.ok) setTvState(d.tv); }).catch(() => {});
+    fetchTv();
+    const interval = setInterval(fetchTv, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1073,6 +1127,9 @@ function AllSpeakersView() {
             </button>
           </div>
         </div>
+
+        {/* TV card */}
+        <TVCard tvState={tvState} />
 
         {/* Speaker groups */}
         <div className="space-y-3">

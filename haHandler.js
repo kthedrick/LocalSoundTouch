@@ -424,6 +424,41 @@ async function handleHa(req, res) {
     return;
   }
 
+  // GET /ha/tv-state — LG TV + Apple TV now-playing
+  if (url === '/ha/tv-state' && req.method === 'GET') {
+    try {
+      const cfg = getConfig();
+      const tv = cfg.tvConfig || {};
+      if (!tv.lgTvEntity) { ok(res, { ok: true, tv: null }); return; }
+
+      const lgState = await haGet('/api/states/' + tv.lgTvEntity);
+      if (!lgState || lgState.state === 'off' || lgState.state === 'unavailable') {
+        ok(res, { ok: true, tv: { on: false } });
+        return;
+      }
+
+      const source = lgState.attributes?.source || '';
+      const result = { ok: true, tv: { on: true, source } };
+
+      if (tv.appleTvEntity && source === tv.appleTvSource) {
+        const atState = await haGet('/api/states/' + tv.appleTvEntity);
+        result.tv.appleTV = {
+          title:  atState?.attributes?.media_title  || null,
+          artist: atState?.attributes?.media_artist || null,
+          app:    atState?.attributes?.app_name     || null,
+          art:    atState?.attributes?.entity_picture ? ('http://homeassistant:8123' + atState.attributes.entity_picture) : null,
+          state:  atState?.state || null,
+        };
+      } else {
+        result.tv.appName = lgState.attributes?.app_name || source;
+        result.tv.sourceList = lgState.attributes?.source_list || [];
+      }
+
+      ok(res, result);
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   // GET /ha/raw-states — dump raw HA state for all speakerEntities (debug)
   if (url === '/ha/raw-states' && req.method === 'GET') {
     try {
