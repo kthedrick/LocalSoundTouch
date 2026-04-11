@@ -202,8 +202,118 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 
 ## Future TODOs
 
-### Testing (next session)
-Full test pass needed — see CLAUDE.md for planned test cases.
+### Test Cases
+
+Run these in order. Each has a setup, action, and expected result.
+
+---
+
+#### 1. Basic MA playback (Radiohead Radio on single speaker)
+- **Setup:** All speakers off / idle
+- **Action:** Open a single speaker card (e.g. Sunroom), tap Radiohead Radio
+- **Expected:** Card shows AIRPLAY source, MA track info (title/artist/art) appears within ~5s, progress timer runs
+
+---
+
+#### 2. Skip / prev during Pandora
+- **Setup:** Radiohead Radio playing on a single speaker
+- **Action:** Tap next track, then prev track
+- **Expected:** Track changes each time; title/art updates within a few seconds
+
+---
+
+#### 3. Power off during Pandora (single speaker)
+- **Setup:** Radiohead Radio playing on one speaker
+- **Action:** Tap power button on that speaker's card
+- **Expected:** Speaker goes to standby. MA does NOT restart playback (stop+clear was called). Card shows standby/off state.
+
+---
+
+#### 4. MA grouping — add a second speaker
+- **Setup:** Radiohead Radio playing on Sunroom (or any single speaker)
+- **Action:** Tap the Include (+) button, select another speaker (e.g. Kitchen)
+- **Expected:** Both speakers play in sync. UI merges into one card. Track info visible on the combined card.
+
+---
+
+#### 5. MA group — remove a speaker (X button)
+- **Setup:** Sunroom + Kitchen grouped and playing
+- **Action:** Tap X on Kitchen within the group card
+- **Expected:** Kitchen separates back to its own card (idle). Sunroom card continues playing solo.
+
+---
+
+#### 6. Bass switch side effect — Sunroom + Living Room
+- **Setup:** Radiohead Radio playing on Sunroom
+- **Action:** Add Living Room to the group (Include)
+- **Expected:** `switch.living_room_bass` turns ON in HA. Check: `http://homeassistant:3000/ha/raw-states` or HA dashboard.
+- **On removal:** Remove Living Room from group → bass switch turns OFF.
+
+---
+
+#### 7. Bass switch does NOT fire for unrelated groups
+- **Setup:** Radiohead Radio playing on Sunroom
+- **Action:** Add Kitchen (not Living Room) to the group
+- **Expected:** `switch.living_room_bass` is NOT toggled. Only fires when Living Room is involved.
+
+---
+
+#### 8. Bedroom AUX redirect — play Pandora on Bedroom
+- **Setup:** All idle
+- **Action:** Play Radiohead Radio targeting Bedroom (tap Radiohead Radio on Bedroom card)
+- **Expected:** Bose-Bedroom switches to AUX1 input. Belkin AirPlay device picks up playback. Card shows AUX source + MA track info.
+
+---
+
+#### 9. Bedroom — add to Pandora group (Bedroom as follower)
+- **Setup:** Radiohead Radio playing on Sunroom
+- **Action:** Include Bose-Bedroom into the Sunroom group
+- **Expected:** Bose-Bedroom switches to AUX1 (Belkin joins the AirPlay group). Bedroom card merges with Sunroom. Audio audible in Bedroom.
+
+---
+
+#### 10. Power off Bedroom while grouped
+- **Setup:** Bedroom grouped with Sunroom (Pandora playing)
+- **Action:** Tap power on Bedroom card
+- **Expected:** Bedroom separates back to its own card. Sunroom continues playing. HA unjoins the Belkin entity.
+
+---
+
+#### 11. Bathroom grouping
+- **Setup:** Radiohead Radio playing on Sunroom
+- **Action:** Include Bathroom into the group
+- **Expected:** Bathroom joins and syncs. No bass switch effect (only Sunroom+LivingRoom triggers it). Bathroom card merges.
+
+---
+
+#### 12. Bathroom + Bedroom not permanently linked (regression check)
+- **Setup:** Play and group Bathroom + Bedroom together, then separate them (X button or power off one)
+- **Expected:** Cards separate cleanly. `/ha/group-state` shows no lingering group between them. Debug: `http://homeassistant:3000/ha/raw-states`
+
+---
+
+#### 13. TV card — LG on non-Apple TV input
+- **Setup:** LG TV on (e.g. Netflix)
+- **Expected:** TV card appears at top of UI showing "Sunroom TV" and the app name (e.g. "Netflix"). No art.
+
+---
+
+#### 14. TV card — LG on Apple OTT input
+- **Setup:** Switch LG TV to Apple TV input ("Apple OTT")
+- **Expected:** Card switches to show "Apple TV" label, current title/artist if something is playing, and album art if available. Updates within 10s.
+
+---
+
+#### 15. TV card hidden when TV off
+- **Setup:** Turn LG TV off
+- **Expected:** TV card disappears from the UI within 10s.
+
+---
+
+#### 16. Release to TV (Sunroom)
+- **Setup:** Radiohead Radio playing on Sunroom
+- **Action:** Power off Sunroom speaker
+- **Expected:** HA does NOT restart Pandora automatically. MA queue is stopped and cleared. Sunroom card shows standby.
 
 ### Pandora station URI
 `library://radio/2` works but needs monitoring. If MA resets Pandora auth, the URI may change. Verify by playing in MA UI and checking `/ha/queues` for the active `current_item.media_item.uri`.
