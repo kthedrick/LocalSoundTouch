@@ -27,6 +27,21 @@ async function apiPost(ip, endpoint, body) {
 }
 
 async function fetchSpeakerData(spk) {
+  if (spk.brand === 'wiim') {
+    try {
+      const res = await fetch('/wiim/status?ip=' + spk.ip);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const d = await res.json();
+      return { ip: spk.ip, name: spk.name, brand: 'wiim', volume: d.volume, muted: d.muted,
+               nowPlaying: d.nowPlaying, playStatus: d.playStatus,
+               zoneInfo: null, presets: [], reachable: true };
+    } catch {
+      return { ip: spk.ip, name: spk.name, brand: 'wiim', volume: 0, muted: false,
+               nowPlaying: null, playStatus: null, zoneInfo: null, presets: [],
+               reachable: false, failedCall: 'status' };
+    }
+  }
+
   const infoRes = await apiGet(spk.ip, '/info');
   if (infoRes === null) {
     return {
@@ -43,11 +58,12 @@ async function fetchSpeakerData(spk) {
     };
   }
 
-  const [volRes, npRes, zoneRes, presetRes] = await Promise.all([
+  const [volRes, npRes, zoneRes, presetRes, queueStateRes] = await Promise.all([
     apiGet(spk.ip, '/volume'),
     apiGet(spk.ip, '/now_playing'),
     apiGet(spk.ip, '/getZone'),
     apiGet(spk.ip, '/presets'),
+    fetch('/upnp/queue/state?speakerIp=' + spk.ip).then(r => r.json()).catch(() => null),
   ]);
 
   const failedCall = !volRes ? 'volume'
@@ -80,6 +96,7 @@ async function fetchSpeakerData(spk) {
       art:           xml.querySelector('art')?.textContent || '',
       duration:      parseInt(timeEl?.getAttribute('total') || '0'),
       position:      parseInt(timeEl?.textContent || '0'),
+      repeatSetting: xml.querySelector('repeatSetting')?.textContent || 'REPEAT_OFF',
     };
   }
 
@@ -107,13 +124,82 @@ async function fetchSpeakerData(spk) {
     })).filter(p => p.name);
   }
 
-  return { ip: spk.ip, name: spk.name, volume, muted, nowPlaying, playStatus, zoneInfo, presets, reachable: true, failedCall };
+  const upnpRepeat = queueStateRes?.repeatMode || 'REPEAT_OFF';
+  return { ip: spk.ip, name: spk.name, volume, muted, nowPlaying, playStatus, zoneInfo, presets, reachable: true, failedCall, upnpRepeat };
+}
+
+// ── RadioBrowserModal ─────────────────────────────────────────────────────────
+function RadioBrowserModal({ speakerName, queueId, onClose, onPlay, onBeforePlay }) {
+  const [stations, setStations] = useState(null);
+  const [error, setError]       = useState(null);
+  const [status, setStatus]     = useState(null);
+
+  useEffect(() => {
+    fetch('/ha/browse-radio')
+      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+      .then(setStations)
+      .catch(e => setError(String(e)));
+  }, []);
+
+  const play = async (station) => {
+    if (onBeforePlay) await onBeforePlay();
+    setStatus('Starting ' + station.name + '...');
+    try {
+      const res = await fetch('/ha/play', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queueId, uri: station.uri }),
+      });
+      const d = await res.json();
+      if (d.ok) { setStatus(station.name + ' started'); setTimeout(onClose, 800); }
+      else setStatus('Error: ' + (d.error || 'unknown'));
+    } catch (e) { setStatus('Error: ' + e.message); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center p-0 pb-10 sm:p-4 z-50"
+         onClick={onClose}>
+      <div className="bg-slate-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] flex flex-col border border-slate-700"
+           onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700 flex-shrink-0">
+          <div>
+            <h2 className="text-white font-semibold text-sm">Radio Stations</h2>
+            <p className="text-blue-400 text-xs">{speakerName}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
+        </div>
+        {/* Status */}
+        {status && (
+          <div className="px-4 py-2 bg-slate-700/50 text-slate-300 text-xs flex-shrink-0">{status}</div>
+        )}
+        {/* List */}
+        <div className="overflow-y-auto flex-1 py-2">
+          {!stations && !error && (
+            <div className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</div>
+          )}
+          {error && (
+            <div className="px-4 py-4 text-red-400 text-sm">{error}</div>
+          )}
+          {stations && stations.map((s, i) => (
+            <button key={i} onClick={() => play(s)}
+              className="w-full text-left px-4 py-2.5 hover:bg-slate-700 transition flex items-center gap-3">
+              <span className="text-slate-400 text-sm flex-shrink-0">📻</span>
+              <span className="text-slate-200 text-sm truncate">
+                {s.name.replace(/ Radio$/i, '')}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── NasBrowserModal ───────────────────────────────────────────────────────────
-function NasBrowserModal({ speakerIp, speakerName, onClose }) {
+function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBeforePlay }) {
   const [serverBase, setServerBase] = useState('');
-  const [currentPath, setCurrentPath] = useState('/volume1/music');
+  const [currentPath, setCurrentPath] = useState(initialPath || '/volume1/music');
   const [entries, setEntries] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -147,6 +233,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
   };
 
   const playUrl = async (url, title, artUrl) => {
+    if (onBeforePlay) await onBeforePlay();
     setStatus('Playing: ' + title);
     try {
       const res = await fetch('/upnp/play', {
@@ -180,6 +267,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
   };
 
   const queueFolder = async (folderPath, title) => {
+    if (onBeforePlay) await onBeforePlay();
     setStatus('Loading...');
     try {
       const data = await fetch('/nas/browse?path=' + encodeURIComponent(folderPath)).then(r => r.json());
@@ -221,7 +309,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
   const breadcrumbs = currentPath.split('/').filter(Boolean).slice(2); // skip volume1/music
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50"
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center p-0 pb-10 sm:p-4 z-50"
          onClick={onClose}>
       <div className="bg-slate-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] flex flex-col border border-slate-700"
            onClick={e => e.stopPropagation()}>
@@ -313,7 +401,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose }) {
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGroup, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onMaStop, haConfig, onPlayFavorite, maTrack }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
@@ -323,21 +411,42 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
   const effectiveTrack    = np?.track  || maTrack?.track  || null;
   const effectiveArtist   = np?.artist || maTrack?.artist || null;
   const effectiveDuration = (np?.duration > 0 ? np.duration : null) ?? (maTrack?.duration || 0);
-  const effectivePosition = (np?.position > 0 ? np.position : null) ?? (maTrack?.position || 0);
-  const isStandby   = !np || np.source === 'STANDBY';
+  const maPosition = maTrack?.positionUpdatedAt
+    ? Math.min((maTrack.position || 0) + (Date.now() / 1000 - maTrack.positionUpdatedAt), maTrack.duration || 0)
+    : (maTrack?.position || 0);
+  const effectivePosition = (np?.position > 0 ? np.position : null) ?? maPosition;
+  const isStandby   = !np || np.source === 'STANDBY' || np.source === 'INVALID_SOURCE';
   const isPlaying   = master?.playStatus === 'PLAY_STATE';
+  const isWiiM      = master?.brand === 'wiim';
   const hasContent  = !isStandby && (np?.track || np?.stationName || np?.source);
 
   const [position, setPosition] = useState(effectivePosition);
   const [artModal, setArtModal] = useState(false);
   const [favStatus, setFavStatus] = useState(null);
+  const [radioBrowser, setRadioBrowser] = useState(false);
+  const [upnpRepeatLocal, setUpnpRepeatLocal] = useState(master?.upnpRepeat || 'REPEAT_OFF');
   const timerRef = useRef(null);
+
+  useEffect(() => { setUpnpRepeatLocal(master?.upnpRepeat || 'REPEAT_OFF'); }, [master?.upnpRepeat]);
+
+  const isUpnp = np?.source === 'UPNP' || np?.source === 'LOCAL_INTERNET_RADIO';
+  const repeatMode = isUpnp ? upnpRepeatLocal : (np?.repeatSetting || 'REPEAT_OFF');
+  const REPEAT_CYCLE = ['REPEAT_OFF', 'REPEAT_ALL', 'REPEAT_ONE'];
+  const cycleRepeat = () => {
+    const next = REPEAT_CYCLE[(REPEAT_CYCLE.indexOf(repeatMode) + 1) % REPEAT_CYCLE.length];
+    if (isUpnp) {
+      setUpnpRepeatLocal(next);
+      fetch('/upnp/queue/repeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ speakerIp: group.masterIp, repeatMode: next }) });
+    } else {
+      onKey(group.masterIp, next);
+    }
+  };
 
   const handlePlayFavorite = async (fav) => {
     const queueId = (master?.name && haConfig?.speakerQueues?.[master.name]) || fav.defaultQueueId;
     setFavStatus('Starting ' + fav.name + '...');
     try {
-      const d = await onPlayFavorite(fav, queueId);
+      const d = await onPlayFavorite(fav, queueId, group.masterIp);
       setFavStatus(d.ok ? fav.name + ' started ✓' : 'Error: ' + JSON.stringify(d.result || d.error));
     } catch (e) {
       setFavStatus('Error: ' + e.message);
@@ -349,18 +458,18 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
 
   useEffect(() => {
     clearInterval(timerRef.current);
-    if (isPlaying && effectiveDuration > 0) {
+    if (isPlaying && (effectiveDuration > 0 || isUpnp)) {
       timerRef.current = setInterval(() => setPosition(p => p + 1), 1000);
     }
     return () => clearInterval(timerRef.current);
-  }, [isPlaying, effectiveDuration, effectiveTrack]);
+  }, [isPlaying, effectiveDuration, isUpnp, effectiveTrack]);
 
   const formatTime = (s) => {
     const n = Math.max(0, Math.floor(s));
     return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
   };
 
-  const pos  = Math.min(position, effectiveDuration);
+  const pos  = effectiveDuration > 0 ? Math.min(position, effectiveDuration) : position;
   const pct  = effectiveDuration > 0 ? Math.round(pos / effectiveDuration * 100) : 0;
 
   return (
@@ -382,48 +491,68 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
                     {np.source}
                   </span>
                 )}
-                {np.sourceAccount && np.sourceAccount !== 'AirPlay2DefaultUserName' && (
+                {maTrack?.provider && (
+                  <span className="px-2 py-0.5 bg-blue-600 bg-opacity-40 text-blue-300 text-xs font-bold rounded-full uppercase tracking-wide">
+                    {maTrack.provider}
+                  </span>
+                )}
+                {maTrack?.stationName && (
+                  <span className="text-slate-400 text-xs">{maTrack.stationName}</span>
+                )}
+                {np.sourceAccount && np.source !== 'STORED_MUSIC' && np.sourceAccount !== 'AirPlay2DefaultUserName' && !/upnp/i.test(np.sourceAccount) && !/^[a-f0-9-]{10,}$/i.test(np.sourceAccount) && (
                   <span className="text-slate-500 text-xs truncate">{np.sourceAccount}</span>
                 )}
               </div>
               {np.stationName && (
                 <p className="text-slate-400 text-xs truncate">{np.stationName}</p>
               )}
-              <p className="text-white font-semibold truncate leading-tight">
+              <p className="text-white font-semibold leading-tight">
                 {effectiveTrack || '—'}
               </p>
               {effectiveArtist && (
-                <p className="text-slate-300 text-sm truncate">{effectiveArtist}</p>
+                <p className="text-slate-300 text-sm">{effectiveArtist}</p>
               )}
-            </div>
-
-            {/* Playback controls */}
-            <div className="flex items-center gap-1 flex-shrink-0">
-              <button onClick={() => onKey(group.masterIp, 'PREV_TRACK')}
-                className="p-1.5 text-slate-400 hover:text-white transition rounded-lg hover:bg-slate-700">
-                <PrevIcon size={15}/>
-              </button>
-              <button onClick={() => onKey(group.masterIp, 'PLAY_PAUSE')}
-                className="p-1.5 text-slate-400 hover:text-white transition rounded-lg hover:bg-slate-700">
-                {isPlaying ? <PauseIcon size={15}/> : <PlayIcon size={15}/>}
-              </button>
-              <button onClick={() => onKey(group.masterIp, 'NEXT_TRACK')}
-                className="p-1.5 text-slate-400 hover:text-white transition rounded-lg hover:bg-slate-700">
-                <NextIcon size={15}/>
-              </button>
             </div>
           </div>
 
+          {/* Playback controls — own row, full width, centered */}
+          <div className="flex items-center justify-around mt-3">
+              <button onClick={() => onKey(group.masterIp, 'PREV_TRACK')}
+                className="p-2 text-slate-400 hover:text-white transition rounded-lg hover:bg-slate-700">
+                <PrevIcon size={22}/>
+              </button>
+              <button onClick={() => onKey(group.masterIp, 'PLAY_PAUSE')}
+                className="p-2 text-slate-400 hover:text-white transition rounded-lg hover:bg-slate-700">
+                {isPlaying ? <PauseIcon size={22}/> : <PlayIcon size={22}/>}
+              </button>
+              <button onClick={() => onKey(group.masterIp, 'NEXT_TRACK')}
+                className="p-2 text-slate-400 hover:text-white transition rounded-lg hover:bg-slate-700">
+                <NextIcon size={22}/>
+              </button>
+              {!isAirplay && (
+                <button onClick={cycleRepeat}
+                  className={'p-2 transition rounded-lg relative ' + (repeatMode !== 'REPEAT_OFF' ? 'text-blue-400 hover:text-blue-300 bg-slate-700' : 'text-slate-400 hover:text-white hover:bg-slate-700')}
+                  title={repeatMode === 'REPEAT_OFF' ? 'Repeat off' : repeatMode === 'REPEAT_ALL' ? 'Repeat all' : 'Repeat one'}>
+                  <RepeatIcon size={22}/>
+                  {repeatMode === 'REPEAT_ONE' && (
+                    <span className="absolute -top-0.5 -right-0.5 bg-blue-400 text-slate-900 text-[8px] font-bold rounded-full w-3 h-3 flex items-center justify-center leading-none">1</span>
+                  )}
+                </button>
+              )}
+          </div>
+
           {/* Progress bar */}
-          {effectiveDuration > 0 && (
+          {(effectiveDuration > 0 || (isUpnp && pos > 0)) && (
             <div className="flex items-center gap-2 mt-2.5">
               <span className="text-slate-500 text-xs tabular-nums w-10 text-right">{formatTime(pos)}</span>
               <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500 rounded-full"
-                     style={{ width: pct + '%' }}/>
+                {effectiveDuration > 0
+                  ? <div className="h-full bg-blue-500 rounded-full" style={{ width: pct + '%' }}/>
+                  : <div className="h-full bg-blue-500/50 rounded-full animate-pulse w-full"/>
+                }
               </div>
               <span className="text-slate-500 text-xs tabular-nums w-10">
-                -{formatTime(effectiveDuration - pos)}
+                {effectiveDuration > 0 ? '-' + formatTime(effectiveDuration - pos) : ''}
               </span>
             </div>
           )}
@@ -438,7 +567,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
             <div className="flex items-center gap-2 mb-2 sm:mb-0">
               <div className="text-slate-500 flex-shrink-0"><SpeakerIcon size={15}/></div>
               <div className="flex-1 min-w-0">
-                <span className="text-slate-200 text-sm font-medium block">{spk.name}</span>
+                <span className="text-white text-base font-semibold block">{spk.name}</span>
                 <span className="text-slate-500 text-[11px] block">{spk.ip}</span>
               </div>
               {spk.reachable && (
@@ -511,94 +640,118 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
       </div>
 
       {/* Pandora */}
-      {haConfig?.favorites?.length > 0 && (
-        <div className="px-4 py-3 border-t border-slate-700/60">
-          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Pandora</h3>
-          <div className="flex gap-1.5 flex-wrap">
-            {haConfig.favorites.map((fav, i) => (
-              <button key={i} onClick={() => handlePlayFavorite(fav)}
-                className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-xs font-medium transition flex items-center gap-1.5 flex-shrink-0">
-                <span>{fav.icon}</span><span>{fav.name}</span>
-              </button>
-            ))}
-          </div>
-          {favStatus && <p className="text-indigo-300 text-xs mt-1.5 italic">{favStatus}</p>}
+      <div className="px-4 py-3 border-t border-slate-700/60">
+        <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Pandora</h3>
+        <div className="flex gap-1.5 flex-wrap items-center">
+          <button onClick={() => setRadioBrowser(true)}
+            className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
+            Browse
+          </button>
+          {haConfig?.favorites?.length > 0 && (
+            <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
+          )}
+          {haConfig?.favorites?.map((fav, i) => (
+            <button key={i} onClick={() => handlePlayFavorite(fav)}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition flex items-center gap-1.5 flex-shrink-0">
+              <span>{fav.icon}</span><span>{fav.name.replace(/ Radio$/i, '')}</span>
+            </button>
+          ))}
         </div>
-      )}
+        {favStatus && <p className="text-indigo-300 text-xs mt-1.5 italic">{favStatus}</p>}
+      </div>
+
+      {/* Home */}
+      <div className="px-4 py-3 border-t border-slate-700/60">
+        <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Home</h3>
+        <div className="flex gap-1.5 flex-wrap items-center">
+          {haConfig?.releaseToTV?.includes(master?.name) && (<>
+            <button onClick={() => {
+                fetch(`/api/${group.masterIp}/select`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/xml' },
+                  body: '<ContentItem source="PRODUCT" sourceAccount="TV"></ContentItem>',
+                });
+                fetch('/ha/release-to-tv', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ speakerName: master?.name }),
+                });
+              }}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-blue-800 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition">
+              📺 TV Input
+            </button>
+            <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
+          </>)}
+          <button onClick={() => onOpenNas()}
+            className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
+            Browse
+          </button>
+          <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
+          <button onClick={() => onPlayNasFolder(group.masterIp, "/volume1/music/_Children/GabbyCat")}
+            className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
+            🪆 Gabby's
+          </button>
+        </div>
+      </div>
 
       {/* Presets */}
       {master.presets && master.presets.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-700/60">
-          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Presets</h3>
-          <div className="flex gap-1 overflow-x-auto">
+          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Bose Presets</h3>
+          <div className="flex gap-1 flex-wrap">
             {master.presets.map(preset => (
-              <button key={preset.id} onClick={() => onKey(group.masterIp, 'PRESET_' + preset.id)}
-                className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-medium truncate whitespace-nowrap flex-shrink-0">
-                {preset.name}
+              <button key={preset.id} onClick={async () => {
+                await onEstablishBoseZone(group.masterIp);
+                onKey(group.masterIp, 'PRESET_' + preset.id);
+              }}
+                className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-medium">
+                {preset.id === 1 ? 'Piazolla' : preset.name.replace(/ Radio$/i, '')}
               </button>
             ))}
           </div>
         </div>
       )}
 
-      {isStandby && (
-        (() => {
-          const playingMasters = otherSpeakers.filter(spk => {
-            const data = speakerData[spk.ip];
-            const masterGroup = groups.find(g => g.masterIp === spk.ip);
-            return masterGroup && data?.nowPlaying?.source && data.nowPlaying.source !== 'STANDBY';
-          });
-          return playingMasters.length > 0 && (
-            <div className="px-4 py-3 border-t border-slate-700/60">
-              <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Sync To</h3>
-              <div className="flex flex-wrap gap-2">
-                {playingMasters.map(spk => (
-                  <button key={spk.ip} onClick={() => onSyncTo(group.speakers[0].ip, spk.ip)}
-                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-xs transition">
-                    {spk.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          );
-        })()
+      {groups.filter(g => g.id !== group.id).length > 0 && (
+        <div className="px-4 py-3 border-t border-slate-700/60">
+          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Sync To</h3>
+          <div className="flex flex-wrap gap-2">
+            {groups.filter(g => g.id !== group.id).map(g => {
+              const gMaster = g.speakers.find(s => s.ip === g.masterIp) || g.speakers[0];
+              const isSelected = pendingGroups?.[g.masterIp]?.has(group.masterIp);
+              return (
+                <button key={g.id}
+                  onClick={() => onTogglePendingMember(g.masterIp, group.masterIp)}
+                  className={'px-2 py-1 rounded text-xs transition ' +
+                    (isSelected
+                      ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                      : 'bg-slate-700 hover:bg-slate-600 text-slate-200')}>
+                  {gMaster?.name || g.masterIp}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       )}
 
-      {!isStandby && otherSpeakers && otherSpeakers.length > 0 && (
+      {otherSpeakers && otherSpeakers.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-700/60">
           <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Include</h3>
           <div className="flex flex-wrap gap-2">
             {otherSpeakers.map(spk => {
-              const data = speakerData[spk.ip];
-              const isPlaying = data?.nowPlaying?.source && data.nowPlaying.source !== 'STANDBY';
-              const handleInclude = () => {
-                const masterQueueId = master?.name && haConfig?.speakerQueues?.[master.name];
-                const targetQueueId = spk.name && haConfig?.speakerQueues?.[spk.name];
-                fetch('/ha/debug', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ source: np?.source, masterName: master?.name, spkName: spk.name, masterQueueId, targetQueueId }),
-                });
-                if (np?.source === 'AIRPLAY') {
-                  // MA/AirPlay: join via HA media_player.join using speaker names
-                  if (master?.name && spk.name) {
-                    fetch('/ha/group-include', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ masterName: master.name, speakerName: spk.name }),
-                    });
-                    return;
-                  }
-                }
-                onAddToGroup(group.masterIp, spk.ip);
-              };
+              const isSelected = pendingGroups?.[group.masterIp]?.has(spk.ip);
               return (
-                <button key={spk.ip} onClick={handleInclude}
+                <button key={spk.ip}
+                  onClick={() => {
+                    const willAdd = !isSelected;
+                    onTogglePendingMember(group.masterIp, spk.ip);
+                    // If already playing and adding a speaker, join immediately
+                    if (willAdd && !isStandby) onJoinNow(group.masterIp, spk.ip);
+                  }}
                   className={'px-2 py-1 rounded text-xs transition ' +
-                    (isPlaying
-                      ? 'bg-green-600 hover:bg-green-500 text-white'
-                      : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
-                    )}>
+                    (isSelected
+                      ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                      : 'bg-slate-700 hover:bg-slate-600 text-slate-200')}>
                   {spk.name}
                 </button>
               );
@@ -607,19 +760,16 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onSyncTo, onAddToGrou
         </div>
       )}
 
-      {/* Bottom bar: Release to TV + NAS */}
-      <div className="px-4 py-2.5 border-t border-slate-700/60 flex items-center justify-between gap-2">
-        {haConfig?.releaseToTV?.includes(master?.name) && onMaStop ? (
-          <button onClick={() => onMaStop(group.masterIp)}
-            className="px-3 py-1 bg-slate-700 hover:bg-red-800 text-slate-400 hover:text-white rounded text-xs transition">
-            ⏏ Release to TV
-          </button>
-        ) : <div/>}
-        <button onClick={onOpenNas}
-          className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded text-xs transition">
-          📁 Browse NAS
-        </button>
-      </div>
+
+      {/* Radio browser modal */}
+      {radioBrowser && (
+        <RadioBrowserModal
+          speakerName={master?.name || group.masterIp}
+          queueId={haConfig?.speakerQueues?.[master?.name] || haConfig?.queues?.airplayGroup}
+          onClose={() => setRadioBrowser(false)}
+          onBeforePlay={() => onEstablishGroup(group.masterIp)}
+        />
+      )}
 
       {/* Album art modal */}
       {artModal && effectiveArt && (
@@ -689,6 +839,7 @@ function AllSpeakersView() {
   const [maGroups, setMaGroups] = useState([]);
   const [maTrackData, setMaTrackData] = useState({}); // speakerName → { track, artist, art }
   const [tvState, setTvState] = useState(null);
+  const [pendingGroups, setPendingGroups] = useState({});
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
 
@@ -698,8 +849,11 @@ function AllSpeakersView() {
       if (!res.ok) return SPEAKERS;
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
-        setSpeakers(data);
-        return data;
+        // Discovery only finds Bose (port 8090) — always re-add non-Bose entries from constants
+        const nonBose = SPEAKERS.filter(s => s.brand && s.brand !== 'bose');
+        const merged = [...data, ...nonBose];
+        setSpeakers(merged);
+        return merged;
       }
     } catch (err) {
       console.warn('fetchSpeakers failed', err);
@@ -745,10 +899,15 @@ function AllSpeakersView() {
 
     Object.values(speakerData).forEach(spk => {
       const src = spk?.nowPlaying?.source;
+      // Clear stale MA track data when speaker is no longer on AIRPLAY/AUX
+      if (spk?.name && src !== 'AIRPLAY' && src !== 'AUX') {
+        setMaTrackData(prev => { if (!prev[spk.name]) return prev; const next = { ...prev }; delete next[spk.name]; return next; });
+        return;
+      }
       if (!spk?.name || (src !== 'AIRPLAY' && src !== 'AUX')) return;
       const speakerQueue = haConfig.speakerQueues?.[spk.name];
       if (!speakerQueue) return;
-      // For AUX: only poll if this speaker has a play redirect (i.e. MA is playing via a redirected queue)
+      // For AUX: use the redirect target queue. For AIRPLAY: use the individual speaker queue.
       const queueId = src === 'AUX' ? redirectMap[speakerQueue] : speakerQueue;
       if (!queueId) return;
       fetch('/ha/queue-now-playing?queueId=' + queueId)
@@ -839,21 +998,11 @@ function AllSpeakersView() {
     // Remove any card whose master IP is an MA group member (absorbed into leader)
     const merged = result.filter(g => !maGroupedIps.has(g.masterIp));
 
-    // Sort: Sunroom first, then playing first, then paused/stopped, then standby, then unreachable
-    const rank = g => {
-      const m = g.speakers.find(s => s.ip === g.masterIp) || g.speakers[0];
-      if (!m?.reachable)               return 3;
-      if (m?.nowPlaying?.source === 'STANDBY' || !m?.nowPlaying) return 2;
-      if (m?.playStatus === 'PLAY_STATE') return 0;
-      return 1;
-    };
-    merged.sort((a, b) => {
-      const aHasSunroom = a.speakers.some(s => s.name === 'Bose-Sunroom 300');
-      const bHasSunroom = b.speakers.some(s => s.name === 'Bose-Sunroom 300');
-      if (aHasSunroom && !bHasSunroom) return -1;
-      if (!aHasSunroom && bHasSunroom) return 1;
-      return rank(a) - rank(b);
-    });
+    // Sort: fixed order matching constants.js (always, regardless of discovery order)
+    const ipOrder = {};
+    SPEAKERS.forEach((s, i) => { ipOrder[s.ip] = i; });
+    const groupRank = g => Math.min(...g.speakers.map(s => ipOrder[s.ip] ?? 999));
+    merged.sort((a, b) => groupRank(a) - groupRank(b));
 
     return merged;
   }, [speakerData, maGroups]);
@@ -966,10 +1115,14 @@ function AllSpeakersView() {
   };
 
   const onVolumeChange = (ip, level, immediate = false) => {
-    setSpeakerData(prev => ({
-      ...prev,
-      [ip]: { ...prev[ip], volume: level }
-    }));
+    setSpeakerData(prev => ({ ...prev, [ip]: { ...prev[ip], volume: level } }));
+    if (speakerData[ip]?.brand === 'wiim') {
+      clearTimeout(volumeTimers.current[ip]);
+      const send = () => fetch('/wiim/volume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, volume: level }) });
+      if (immediate) send();
+      else volumeTimers.current[ip] = setTimeout(send, 250);
+      return;
+    }
     if (immediate) {
       apiPost(ip, '/volume', '<volume>' + level + '</volume>');
     } else {
@@ -985,10 +1138,46 @@ function AllSpeakersView() {
     if (!current) return;
     const newMuted = !current.muted;
     setSpeakerData(prev => ({ ...prev, [ip]: { ...prev[ip], muted: newMuted } }));
+    if (current.brand === 'wiim') {
+      fetch('/wiim/mute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, muted: newMuted }) });
+      return;
+    }
     apiPost(ip, '/volume', '<volume>' + current.volume + '<muteenabled>' + newMuted + '</muteenabled></volume>');
   };
 
   const onKey = (ip, key) => {
+    if (speakerData[ip]?.brand === 'wiim') {
+      const wiimSrc = speakerData[ip]?.nowPlaying?.source;
+      const wiimName = speakerData[ip]?.name;
+      const wiimQueue = haConfig?.speakerQueues?.[wiimName];
+      if (key === 'NEXT_TRACK' || key === 'PREV_TRACK') {
+        fetch(key === 'NEXT_TRACK' ? '/upnp/queue/skip' : '/upnp/queue/prev', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speakerIp: ip }),
+        });
+      } else if (key === 'PLAY_PAUSE' && wiimSrc === 'AIRPLAY') {
+        if (wiimQueue) {
+          const isPlaying = speakerData[ip]?.playStatus === 'PLAY_STATE';
+          fetch(isPlaying ? '/ha/pause' : '/ha/resume', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ queueId: wiimQueue }),
+          });
+          setTimeout(pollAll, 800);
+        }
+      } else if (key === 'POWER') {
+        if (wiimSrc === 'AIRPLAY' && wiimQueue) {
+          fetch('/ha/stop',  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: wiimQueue }) });
+          fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: wiimQueue }) });
+        } else {
+          fetch('/wiim/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, key: 'PLAY_PAUSE' }) });
+        }
+        setTimeout(pollAll, 1000);
+      } else {
+        fetch('/wiim/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, key }) });
+        setTimeout(pollAll, 800);
+      }
+      return;
+    }
     // When powering off a speaker playing via MA/AirPlay, stop+clear MA queues so it won't auto-restart
     if (key === 'POWER') {
       const src = speakerData[ip]?.nowPlaying?.source;
@@ -1072,7 +1261,111 @@ function AllSpeakersView() {
     }).then(() => setTimeout(pollAll, 1000));
   };
 
-  const playFavorite = async (fav, queueId) => {
+  const joinSpeakerNow = async (leaderIp, memberIp) => {
+    const leaderName = speakerData[leaderIp]?.name;
+    const memberName = speakerData[memberIp]?.name;
+    const leaderSource = speakerData[leaderIp]?.nowPlaying?.source;
+    const hasWiiM = speakerData[memberIp]?.brand === 'wiim' || speakerData[leaderIp]?.brand === 'wiim';
+    if (leaderName && memberName && haConfig?.speakerEntities?.[leaderName]) {
+      await fetch('/ha/group-include', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ masterName: leaderName, speakerNames: [memberName] }),
+      }).catch(e => console.warn('[joinSpeakerNow] MA error:', e));
+    }
+    // Only set up Bose zone for non-AirPlay sources — zone setup while on AirPlay
+    // interferes with the AirPlay stream and prevents the speaker from joining
+    if (!hasWiiM && leaderSource !== 'AIRPLAY' && leaderSource !== 'AUX') {
+      await addSpeakerToGroup(leaderIp, memberIp);
+    }
+    setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);
+  };
+
+  const togglePendingMember = (leaderIp, memberIp) => {
+    setPendingGroups(prev => {
+      const current = new Set(prev[leaderIp] || []);
+      if (current.has(memberIp)) current.delete(memberIp);
+      else current.add(memberIp);
+      const next = { ...prev };
+      if (current.size === 0) delete next[leaderIp];
+      else next[leaderIp] = current;
+      return next;
+    });
+  };
+
+  const establishGroup = async (leaderIp) => {
+    const members = pendingGroups[leaderIp];
+    if (!members || members.size === 0) return;
+    const memberIps = [...members];
+    const leaderName = speakerData[leaderIp]?.name;
+    const memberNames = memberIps.map(ip => speakerData[ip]?.name).filter(Boolean);
+
+    // Set up MA/AirPlay group only — no Bose zone here.
+    // Bose zone setup while on AirPlay interferes with subsequent dynamic adds (MA restart
+    // rebuilds the AirPlay session, dropping any speakers added after initial group formation).
+    // For NAS/UPnP, joinSpeakerNow handles Bose zone via addSpeakerToGroup once playing.
+    if (leaderName && haConfig?.speakerEntities?.[leaderName] && memberNames.length > 0) {
+      await fetch('/ha/group-include', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ masterName: leaderName, speakerNames: memberNames }),
+      }).catch(e => console.warn('[establishGroup] MA join error:', e));
+    }
+
+    // Update group display after setup (play functions own the pollAll timing)
+    setTimeout(fetchMaGroups, 2000);
+  };
+
+  // Establish a Bose SoundTouch zone from pending group members — used for NAS/UPnP/preset play.
+  // Does NOT call MA join (that would switch speakers to AirPlay and break UPnP sync).
+  // WiiM speakers are skipped — they cannot join a SoundTouch zone.
+  const establishBoseZone = async (leaderIp) => {
+    const members = pendingGroups[leaderIp];
+    if (!members || members.size === 0) return;
+    const memberIps = [...members].filter(ip => speakerData[ip]?.brand !== 'wiim');
+    if (memberIps.length === 0) return;
+    const masterDeviceId = await getDeviceId(leaderIp);
+    if (!masterDeviceId) return;
+    const memberData = await Promise.all(memberIps.map(async ip => ({
+      ip, deviceId: await getDeviceId(ip),
+    })));
+    const valid = memberData.filter(m => m.deviceId);
+    if (!valid.length) return;
+    const membersXml = valid.map(m => '<member ipaddress="' + m.ip + '">' + m.deviceId + '</member>').join('');
+    const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<zone master="' + masterDeviceId + '" senderIPAddress="' + leaderIp + '">' + membersXml + '</zone>';
+    await apiPost(leaderIp, '/setZone', xml);
+    setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
+  };
+
+  const playNasFolder = async (speakerIp, folderPath) => {
+    await establishBoseZone(speakerIp);
+    try {
+      const { base: serverBase } = await fetch('/serverInfo').then(r => r.json());
+      const data = await fetch('/nas/browse?path=' + encodeURIComponent(folderPath)).then(r => r.json());
+      const files = data.files || [];
+      if (!files.length) return;
+      const base = folderPath.replace(/\/$/, '');
+      const artUrl = data.artFile
+        ? serverBase + '/nas/art?path=' + encodeURIComponent(base + '/' + data.artFile)
+        : null;
+      const tracks = files.map(f => ({
+        url: serverBase + '/nas/stream?path=' + encodeURIComponent(base + '/' + f),
+        title: f.replace(/\.[^.]+$/, ''),
+        artUrl,
+      }));
+      await fetch('/upnp/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakerIp, tracks }),
+      });
+    } catch (e) {
+      console.error('playNasFolder error:', e);
+    }
+  };
+
+  const playFavorite = async (fav, queueId, leaderIp) => {
+    if (leaderIp) await establishGroup(leaderIp);
     const targetQueue = queueId || fav.defaultQueueId;
     const res = await fetch('/ha/play', {
       method: 'POST',
@@ -1080,7 +1373,11 @@ function AllSpeakersView() {
       body: JSON.stringify({ queueId: targetQueue, uri: fav.uri }),
     });
     const d = await res.json();
-    if (d.ok) setTimeout(pollAll, 3000);
+    if (d.ok) {
+      // Poll twice: first at 3s to update play state, again at 6s to catch MA track metadata
+      setTimeout(pollAll, 3000);
+      setTimeout(pollAll, 6000);
+    }
     return d;
   };
 
@@ -1110,13 +1407,13 @@ function AllSpeakersView() {
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h1 className="text-2xl font-bold text-white">SoundTouch</h1>
+            <BoomBoxIcon size={80}/>
             <p className="text-slate-500 text-xs mt-0.5">
               {lastUpdated ? 'Updated ' + lastUpdated.toLocaleTimeString() : 'Scanning speakers... (' + Object.keys(speakerData).length + '/' + speakers.length + ')'}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={pollAll}
+            <button onClick={() => window.location.reload()}
               className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
               Refresh
             </button>
@@ -1138,16 +1435,22 @@ function AllSpeakersView() {
             return (
               <GroupCard key={group.id} group={group}
                 onVolumeChange={onVolumeChange} onMute={onMute} onKey={onKey}
-                onSyncTo={syncSpeakerTo} onAddToGroup={addSpeakerToGroup} onRemoveFromGroup={removeSpeakerFromGroup}
+                onRemoveFromGroup={removeSpeakerFromGroup}
                 otherSpeakers={speakers.filter(s => !group.speakers.some(gs => gs.ip === s.ip))}
                 speakerData={speakerData}
                 groups={groups}
-                onOpenNas={() => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp })}
+                onOpenNas={(path) => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp, initialPath: path })}
+                onPlayNasFolder={playNasFolder}
                 onMaStop={onMaStop}
                 onMaGroupRemove={onMaGroupRemove}
                 haConfig={haConfig}
                 onPlayFavorite={playFavorite}
                 maTrack={maTrackData[master?.name]}
+                pendingGroups={pendingGroups}
+                onTogglePendingMember={togglePendingMember}
+                onEstablishGroup={establishGroup}
+                onEstablishBoseZone={establishBoseZone}
+                onJoinNow={joinSpeakerNow}
               />
             );
           })}
@@ -1170,7 +1473,9 @@ function AllSpeakersView() {
         <NasBrowserModal
           speakerIp={nasBrowser.ip}
           speakerName={nasBrowser.name}
+          initialPath={nasBrowser.initialPath}
           onClose={() => setNasBrowser(null)}
+          onBeforePlay={() => establishBoseZone(nasBrowser.ip)}
         />
       )}
     </div>

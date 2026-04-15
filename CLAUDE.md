@@ -24,6 +24,9 @@ Entity IDs are NOT auto-derivable — MA assigns a numeric suffix and the number
 | Bose-Joshua | `media_player.bose_joshua_6` | |
 | Bose-Rosemary | `media_player.bose_rosemary_6` | |
 | Bose-Bedroom | `media_player.bose_bathroom2` | **This is the Belkin AirPlay adapter, NOT the Bose-Bedroom speaker.** Bose-Bedroom has no native AirPlay so cannot join AirPlay sync groups. The Belkin (on AUX1) is used for MA grouping. It was auto-named `bose_bathroom2` by HA before renaming — the name is misleading. |
+| WiiM Basement | `media_player.wiim_basement` | Verified working for MA grouping |
+| WiiM Joshua | `media_player.audiopro_a10_wiim_124c` | **AudioPro A10 speaker with WiiM inside.** The `media_player.wiim_joshua` entity exists but is NOT the right one for MA AirPlay grouping — use the AudioPro entity. |
+| WiiM Rosemary | `media_player.wiim_rosemary` | Assumed (same pattern as Basement); verify if grouping fails |
 
 ### HA group_members behavior (important for /ha/group-state logic)
 

@@ -29,6 +29,7 @@ tar -czf - \
   --exclude='./.claude' \
   --exclude='./*.pdf' \
   --exclude='./nasConfig.json' \
+  --exclude='./haConfig.json' \
   --exclude='./node_modules' \
   . | $SSH "tar -xzf - -C $ADDON_DIR"
 

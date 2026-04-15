@@ -219,7 +219,7 @@ async function soundtouchPlay(speakerIp, streamUrl, title) {
 }
 
 // ── Queue management ──────────────────────────────────────────────────────────
-const queues = {}; // speakerIp → { tracks, idx, timerId }
+const queues = {}; // speakerIp → { tracks, idx, timerId, repeatMode }
 
 async function getTransportState(ip) {
   try {
@@ -234,14 +234,39 @@ async function getTransportState(ip) {
 
 async function playQueueNext(speakerIp) {
   const q = queues[speakerIp];
-  if (!q || q.idx >= q.tracks.length) {
-    delete queues[speakerIp];
-    return;
+  if (!q) return;
+
+  console.log(`[Queue] playQueueNext ${speakerIp} repeatMode=${q.repeatMode} idx=${q.idx} total=${q.tracks.length}`);
+
+  // Repeat one: rewind so we replay the track that just finished
+  if (q.repeatMode === 'REPEAT_ONE' && q.idx > 0) {
+    q.idx--;
+    console.log(`[Queue] REPEAT_ONE rewind → idx=${q.idx}`);
   }
+
+  // End of queue
+  if (q.idx >= q.tracks.length) {
+    if (q.repeatMode === 'REPEAT_ALL') {
+      q.idx = 0;
+      console.log(`[Queue] REPEAT_ALL wrap → idx=0`);
+    } else {
+      console.log(`[Queue] end of queue, stopping`);
+      delete queues[speakerIp];
+      return;
+    }
+  }
+
   const track = q.tracks[q.idx++];
-  console.log(`[Queue] ${speakerIp} track ${q.idx}/${q.tracks.length}: ${track.title}`);
+  console.log(`[Queue] ${speakerIp} playing track ${q.idx}/${q.tracks.length}: ${track.title}`);
   try {
-    await playUrl(speakerIp, track.url, track.title, track.artUrl);
+    // Add cache-buster so the speaker treats each play as a fresh stream (prevents
+    // it from sending a Range header starting at EOF when replaying the same URL)
+    const sep = track.url.includes('?') ? '&' : '?';
+    const freshUrl = track.url + sep + '_t=' + Date.now();
+    // Stop first to ensure the speaker's transport is in a clean state
+    try { await stopPlay(speakerIp); } catch (_) {}
+    await playUrl(speakerIp, freshUrl, track.title, track.artUrl);
+    console.log(`[Queue] playUrl succeeded, starting poll`);
 
     // Two-phase poll:
     //   Phase 1 — wait until we confirm PLAYING (up to 15s), so we don't
@@ -253,22 +278,28 @@ async function playQueueNext(speakerIp) {
     const pollInterval = setInterval(async () => {
       if (!queues[speakerIp] || queues[speakerIp] !== q) { clearInterval(pollInterval); return; }
       const state = await getTransportState(speakerIp);
+      console.log(`[Queue] poll ${speakerIp} state=${state} seenPlaying=${seenPlaying} phase1Ticks=${phase1Ticks}`);
 
       if (!seenPlaying) {
         if (state === 'PLAYING') { seenPlaying = true; return; }
         // Give up waiting for PLAYING after 15s — something went wrong
-        if (++phase1Ticks >= 5) { clearInterval(pollInterval); delete queues[speakerIp]; }
+        if (++phase1Ticks >= 5) {
+          console.log(`[Queue] phase1 timeout waiting for PLAYING, giving up`);
+          clearInterval(pollInterval);
+          delete queues[speakerIp];
+        }
         return;
       }
 
       if (state === 'STOPPED' || state === 'NO_MEDIA_PRESENT') {
+        console.log(`[Queue] track ended (${state}), advancing`);
         clearInterval(pollInterval);
         playQueueNext(speakerIp);
       }
     }, 3000);
     q.timerId = pollInterval;
   } catch (err) {
-    console.error('[Queue] error:', err.message);
+    console.error('[Queue] playUrl error:', err.message);
     delete queues[speakerIp];
   }
 }
@@ -296,11 +327,14 @@ async function handleUpnp(req, res) {
     if (!speakerIp || !url) {
       res.writeHead(400); res.end('speakerIp and url required'); return;
     }
-    // Try UPnP first, fall back to SoundTouch API
+    // Try UPnP first — route through queue so repeat/polling work for single tracks too
     try {
       const device = await probeDevice(speakerIp);
       if (device) {
-        await playUrl(speakerIp, url, title || '', artUrl);
+        const prevRepeat = queues[speakerIp]?.repeatMode || 'REPEAT_OFF';
+        if (queues[speakerIp]?.timerId) clearInterval(queues[speakerIp].timerId);
+        queues[speakerIp] = { tracks: [{ url, title: title || '', artUrl }], idx: 0, timerId: null, repeatMode: prevRepeat };
+        await playQueueNext(speakerIp);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, method: 'upnp' }));
         return;
@@ -351,7 +385,8 @@ async function handleUpnp(req, res) {
       res.writeHead(400); res.end('speakerIp and tracks[] required'); return;
     }
     if (queues[speakerIp]?.timerId) clearInterval(queues[speakerIp].timerId);
-    queues[speakerIp] = { tracks, idx: 0, timerId: null };
+    const prevRepeat = queues[speakerIp]?.repeatMode || 'REPEAT_OFF';
+    queues[speakerIp] = { tracks, idx: 0, timerId: null, repeatMode: prevRepeat };
     try {
       await playQueueNext(speakerIp);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -376,6 +411,23 @@ async function handleUpnp(req, res) {
     } catch (err) {
       res.writeHead(500); res.end(JSON.stringify({ ok: false, error: err.message }));
     }
+    return;
+  }
+
+  if (urlPath === '/upnp/queue/state' && req.method === 'GET') {
+    const ip = new URL(req.url, 'http://localhost').searchParams.get('speakerIp');
+    const q = ip && queues[ip];
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ repeatMode: q?.repeatMode || 'REPEAT_OFF' }));
+    return;
+  }
+
+  if (urlPath === '/upnp/queue/repeat' && req.method === 'POST') {
+    const { speakerIp, repeatMode } = await parseBody(req);
+    if (!speakerIp) { res.writeHead(400); res.end('speakerIp required'); return; }
+    if (queues[speakerIp]) queues[speakerIp].repeatMode = repeatMode;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, repeatMode }));
     return;
   }
 

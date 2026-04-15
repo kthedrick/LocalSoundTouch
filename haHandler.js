@@ -140,7 +140,7 @@ async function handleHa(req, res) {
   // GET /ha/config — return haConfig (no token) for the UI
   if (url === '/ha/config' && req.method === 'GET') {
     const cfg = getConfig();
-    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [] };
+    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [] };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(safe));
     return;
@@ -169,11 +169,53 @@ async function handleHa(req, res) {
     return;
   }
 
+  // GET /ha/browse-radio — list all radio stations from MA library via HA service
+  if (url === '/ha/browse-radio' && req.method === 'GET') {
+    try {
+      // Discover MA config entry ID
+      const entries = await haGet('/api/config/config_entries/entry');
+      const entry = entries.find(e => e.domain === 'music_assistant');
+      if (!entry) throw new Error('Music Assistant integration not found in HA');
+      const config_entry_id = entry.entry_id;
+
+      // Fetch both favorited and non-favorited radio stations
+      const [favRes, nonFavRes] = await Promise.all([
+        haServicePost('/api/services/music_assistant/get_library?return_response', { config_entry_id, media_type: 'radio', limit: 500, favorite: true }),
+        haServicePost('/api/services/music_assistant/get_library?return_response', { config_entry_id, media_type: 'radio', limit: 500, favorite: false }),
+      ]);
+      const favItems    = favRes.body?.service_response?.items || [];
+      const nonFavItems = nonFavRes.body?.service_response?.items || [];
+      const allItems    = [...favItems, ...nonFavItems];
+      const stations = allItems
+        .map(i => ({ name: i.name, uri: i.uri, image: i.image || null }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(stations));
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   // POST /ha/stop — stop a queue { queueId }
   if (url === '/ha/stop' && req.method === 'POST') {
     const body = await readBody(req);
     try {
       await stopQueue(body.queueId);
+      ok(res, {});
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/release-to-tv — stop+clear speaker queue AND AirPlay group queue { speakerName }
+  if (url === '/ha/release-to-tv' && req.method === 'POST') {
+    const body = await readBody(req);
+    const cfg = getConfig();
+    const speakerQueueId = cfg.speakerQueues?.[body.speakerName];
+    const groupQueueId   = cfg.queues?.airplayGroup;
+    try {
+      const ops = [];
+      if (speakerQueueId) ops.push(stopQueue(speakerQueueId).then(() => clearQueue(speakerQueueId)));
+      if (groupQueueId)   ops.push(stopQueue(groupQueueId).then(() => clearQueue(groupQueueId)));
+      await Promise.allSettled(ops);
       ok(res, {});
     } catch (e) { err(res, e.message); }
     return;
@@ -280,6 +322,9 @@ async function handleHa(req, res) {
       const queue = Array.isArray(queues) ? queues.find(q => q.queue_id === queueId) : null;
       const item = queue?.current_item;
       const meta = item?.streamdetails?.stream_metadata;
+      const mediaType = item?.media_item?.media_type || item?.streamdetails?.media_type || null;
+      const stationName = mediaType === 'radio' ? (item?.media_item?.name || item?.name || null) : null;
+      const provider = item?.streamdetails?.provider || null;
       ok(res, {
         track:    meta?.title  || item?.name || null,
         artist:   meta?.artist || null,
@@ -288,6 +333,10 @@ async function handleHa(req, res) {
         uri:      item?.media_item?.uri || null,
         duration: item?.duration || 0,
         position: queue?.elapsed_time || 0,
+        positionUpdatedAt: queue?.elapsed_time_last_updated || null,
+        mediaType,
+        stationName,
+        provider,
       });
     } catch (e) { err(res, e.message); }
     return;
@@ -313,38 +362,42 @@ async function handleHa(req, res) {
     return;
   }
 
-  // POST /ha/group-include — join a speaker into master's MA group { masterName, speakerName }
+  // POST /ha/group-include — join speakers into master's MA group
+  // Accepts { masterName, speakerName } (single) or { masterName, speakerNames } (array)
   if (url === '/ha/group-include' && req.method === 'POST') {
     const body = await readBody(req);
     const masterEntity = speakerNameToEntityId(body.masterName);
-    const targetEntity = speakerNameToEntityId(body.speakerName);
-    if (!masterEntity || !targetEntity) {
-      err(res, `No HA entity mapped for: ${!masterEntity ? body.masterName : body.speakerName}`);
+    const names = body.speakerNames || (body.speakerName ? [body.speakerName] : []);
+    const targetEntities = names.map(n => speakerNameToEntityId(n)).filter(Boolean);
+    if (!masterEntity || targetEntities.length === 0) {
+      const missing = !masterEntity ? body.masterName : names.filter(n => !speakerNameToEntityId(n)).join(', ');
+      err(res, `No HA entity mapped for: ${missing}`);
       return;
     }
     try {
       const result = await haServicePost('/api/services/media_player/join', {
         entity_id: masterEntity,
-        group_members: [targetEntity],
+        group_members: targetEntities,
       });
-      console.log('[ha/group-include] %s + %s → status=%d', masterEntity, targetEntity, result.status);
+      console.log('[ha/group-include] %s + [%s] → status=%d', masterEntity, targetEntities.join(', '), result.status);
       ok(res, { status: result.status });
     } catch (e) {
       console.error('[ha/group-include] error:', e.message);
       err(res, e.message);
       return;
     }
-    // If this speaker has a Bose input redirect (e.g. Bedroom → AUX1 for Belkin), switch it now
+    // Apply per-member side effects (e.g. Bedroom → switch Bose to AUX1 for Belkin)
     const cfg2 = getConfig();
-    const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === body.speakerName && r.boseSwitchInput);
-    if (redirect) {
-      const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
-      boseSwitchInput(ip, source, sourceAccount)
-        .then(() => console.log('[group-include] switched %s to %s', ip, source))
-        .catch(e => console.error('[group-include] boseSwitchInput error:', e.message));
+    for (const speakerName of names) {
+      const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === speakerName && r.boseSwitchInput);
+      if (redirect) {
+        const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
+        boseSwitchInput(ip, source, sourceAccount)
+          .then(() => console.log('[group-include] switched %s to %s', ip, source))
+          .catch(e => console.error('[group-include] boseSwitchInput error:', e.message));
+      }
     }
-    // Fire-and-forget: apply side effects after group state settles
-    setTimeout(() => applyGroupSideEffects([body.masterName, body.speakerName]), 1500);
+    setTimeout(() => applyGroupSideEffects([body.masterName, ...names]), 1500);
     return;
   }
 

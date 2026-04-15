@@ -115,9 +115,10 @@ async function listAll(host, user, pass, ftpPath) {
   const ctrl = await openControl(host);
   try {
     await login(ctrl, user, pass);
+    await cmd(ctrl, `CWD ${ftpPath || '/'}`);
     const { ip, port } = await pasv(ctrl);
     const data = await openData(ip, port);
-    ctrl.write(`LIST ${ftpPath || '/'}\r\n`);
+    ctrl.write('LIST\r\n');
     const raw = await collectStream(data);
     ctrl.end();
     const files = [];
@@ -145,9 +146,10 @@ async function list(host, user, pass, ftpPath) {
   const ctrl = await openControl(host);
   try {
     await login(ctrl, user, pass);
+    await cmd(ctrl, `CWD ${ftpPath || '/'}`);
     const { ip, port } = await pasv(ctrl);
     const data = await openData(ip, port);
-    ctrl.write(`LIST ${ftpPath || '/'}\r\n`);
+    ctrl.write('LIST\r\n');
     const raw = await collectStream(data);
     ctrl.end();
     return parseListing(raw);

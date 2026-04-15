@@ -5,7 +5,8 @@ const speakerDiscovery = require('./speakerDiscovery');
 const handleNas = require('./nasHandler');
 const upnpModule = require('./upnpHandler');
 const handleUpnp = upnpModule.handle;
-const handleHa = require('./haHandler');
+const handleHa   = require('./haHandler');
+const handleWiim = require('./wiimHandler');
 
 const publicDir = path.join(__dirname, 'public');
 
@@ -50,6 +51,11 @@ module.exports = function handleRequest(req, res, serverBase) {
 
   if (req.url.startsWith('/ha/')) {
     handleHa(req, res);
+    return;
+  }
+
+  if (req.url.startsWith('/wiim/')) {
+    handleWiim(req, res);
     return;
   }
 
