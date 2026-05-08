@@ -386,7 +386,9 @@ Runs two parallel mechanisms per speaker:
 #### 1. WebSocket (primary — instant)
 Opens a persistent WebSocket connection to each speaker on port 8080.
 
-**Critical handshake requirements** (discovered empirically — libwebsockets on Bose rejects without these):
+**Reference:** [libsoundtouch](https://libsoundtouch.readthedocs.io/en/latest/) ([source](https://github.com/CharlesBlonde/libsoundtouch)) — Python library for Bose SoundTouch. Its `device.py` reveals the correct WebSocket URL format (`ws://<host>:<port>/`). The Python `websocket-client` library it uses automatically sends `User-Agent` and `Accept` headers which turned out to be required.
+
+**Critical handshake requirements** (discovered by comparing curl success vs Node.js failure — libwebsockets on Bose rejects without these):
 ```
 GET / HTTP/1.1                          ← path is /, NOT /WebSocket
 Host: <ip>:8080
