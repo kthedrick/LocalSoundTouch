@@ -128,32 +128,67 @@ async function fetchSpeakerData(spk) {
   return { ip: spk.ip, name: spk.name, volume, muted, nowPlaying, playStatus, zoneInfo, presets, reachable: true, failedCall, upnpRepeat };
 }
 
-// ── RadioBrowserModal ─────────────────────────────────────────────────────────
-function RadioBrowserModal({ speakerName, queueId, onClose, onPlay, onBeforePlay }) {
-  const [stations, setStations] = useState(null);
-  const [error, setError]       = useState(null);
-  const [status, setStatus]     = useState(null);
+// ── MABrowserModal ────────────────────────────────────────────────────────────
+function MABrowserModal({ speakerName, queueId, onClose, onBeforePlay, onFilesystem }) {
+  const [stack, setStack]   = useState([{ uri: '', title: 'Library' }]);
+  const [items, setItems]   = useState(null);
+  const [error, setError]   = useState(null);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => { document.body.style.overflow = 'hidden'; return () => { document.body.style.overflow = ''; }; }, []);
+
+  const current = stack[stack.length - 1];
 
   useEffect(() => {
-    fetch('/ha/browse-radio')
-      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
-      .then(setStations)
+    setItems(null);
+    setError(null);
+    let qs = current.uri ? '?uri=' + encodeURIComponent(current.uri) : '';
+    if (current.uri && current.title) qs += '&name=' + encodeURIComponent(current.title);
+    fetch('/ha/browse-ma' + qs)
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) setItems(d.items);
+        else setError(d.error || 'Browse failed');
+      })
       .catch(e => setError(String(e)));
-  }, []);
+  }, [current.uri]);
 
-  const play = async (station) => {
+  const play = async (item) => {
     if (onBeforePlay) await onBeforePlay();
-    setStatus('Starting ' + station.name + '...');
+    setStatus('Starting ' + item.name + '...');
     try {
       const res = await fetch('/ha/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ queueId, uri: station.uri }),
+        body: JSON.stringify({ queueId, uri: item.uri }),
       });
       const d = await res.json();
-      if (d.ok) { setStatus(station.name + ' started'); setTimeout(onClose, 800); }
+      if (d.ok) { setStatus(item.name + ' started'); setTimeout(onClose, 800); }
       else setStatus('Error: ' + (d.error || 'unknown'));
     } catch (e) { setStatus('Error: ' + e.message); }
+  };
+
+  const enter = (item) => {
+    // Redirect filesystem provider to the NAS browser
+    if (onFilesystem && (item.uri || '').startsWith('filesystem_')) {
+      onFilesystem(item.uri);
+      return;
+    }
+    setStack(prev => [...prev, { uri: item.uri, title: item.name }]);
+  };
+
+  const back = () => {
+    setStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
+  };
+
+  const mediaIcon = (item) => {
+    const mt = (item.mediaType || '').toLowerCase();
+    if (mt === 'radio')    return '📻';
+    if (mt === 'album')    return '💿';
+    if (mt === 'artist')   return '🎤';
+    if (mt === 'playlist') return '🎵';
+    if (mt === 'track')    return '🎵';
+    return item.canExpand ? '📁' : '▶';
   };
 
   return (
@@ -163,11 +198,16 @@ function RadioBrowserModal({ speakerName, queueId, onClose, onPlay, onBeforePlay
            onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700 flex-shrink-0">
-          <div>
-            <h2 className="text-white font-semibold text-sm">Radio Stations</h2>
-            <p className="text-blue-400 text-xs">{speakerName}</p>
+          <div className="flex items-center gap-2 min-w-0">
+            {stack.length > 1 && (
+              <button onClick={back} className="text-slate-400 hover:text-white text-sm font-bold flex-shrink-0">← Back</button>
+            )}
+            <div className="min-w-0">
+              <h2 className="text-white font-semibold text-sm truncate">{current.title}</h2>
+              <p className="text-blue-400 text-xs">{speakerName}</p>
+            </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none flex-shrink-0 ml-2">✕</button>
         </div>
         {/* Status */}
         {status && (
@@ -175,20 +215,33 @@ function RadioBrowserModal({ speakerName, queueId, onClose, onPlay, onBeforePlay
         )}
         {/* List */}
         <div className="overflow-y-auto flex-1 py-2">
-          {!stations && !error && (
+          {!items && !error && (
             <div className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</div>
           )}
           {error && (
             <div className="px-4 py-4 text-red-400 text-sm">{error}</div>
           )}
-          {stations && stations.map((s, i) => (
-            <button key={i} onClick={() => play(s)}
-              className="w-full text-left px-4 py-2.5 hover:bg-slate-700 transition flex items-center gap-3">
-              <span className="text-slate-400 text-sm flex-shrink-0">📻</span>
-              <span className="text-slate-200 text-sm truncate">
-                {s.name.replace(/ Radio$/i, '')}
-              </span>
-            </button>
+          {items && items.map((item, i) => (
+            <div key={i} className="flex items-center hover:bg-slate-700 transition">
+              <button
+                onClick={() => item.canExpand ? enter(item) : play(item)}
+                className="flex-1 text-left px-4 py-2.5 flex items-center gap-3 min-w-0">
+                {item.image
+                  ? <img src={item.image} alt="" className="w-8 h-8 rounded object-cover flex-shrink-0" />
+                  : <span className="text-slate-400 text-sm flex-shrink-0 w-8 text-center">{mediaIcon(item)}</span>
+                }
+                <span className="text-slate-200 text-sm truncate flex-1">{item.name}</span>
+                {item.canExpand && <span className="text-slate-500 text-xs flex-shrink-0">›</span>}
+              </button>
+              {item.canExpand && item.canPlay && (
+                <button
+                  onClick={() => play(item)}
+                  className="px-3 py-2.5 text-slate-400 hover:text-white text-base flex-shrink-0"
+                  title="Play">
+                  ▶
+                </button>
+              )}
+            </div>
           ))}
         </div>
       </div>
@@ -197,7 +250,7 @@ function RadioBrowserModal({ speakerName, queueId, onClose, onPlay, onBeforePlay
 }
 
 // ── NasBrowserModal ───────────────────────────────────────────────────────────
-function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBeforePlay }) {
+function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBeforePlay, queueId, maFilesystemBase }) {
   const [serverBase, setServerBase] = useState('');
   const [currentPath, setCurrentPath] = useState(initialPath || '/volume1/music');
   const [entries, setEntries] = useState(null);
@@ -205,6 +258,8 @@ function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBefor
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
   const [shuffle, setShuffle] = useState(false);
+
+  useEffect(() => { document.body.style.overflow = 'hidden'; return () => { document.body.style.overflow = ''; }; }, []);
 
   useEffect(() => {
     fetch('/serverInfo').then(r => r.json()).then(d => setServerBase(d.base)).catch(() => {});
@@ -232,17 +287,37 @@ function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBefor
     setCurrentPath(next);
   };
 
+  // Convert FTP path to MA filesystem URI: /volume1/music/... → maFilesystemBase + folder/music/...
+  const ftpToMaUri = (ftpPath) => {
+    const relative = ftpPath.replace(/^\/volume\d+\//, '');
+    const base = (maFilesystemBase || '').replace(/\/$/, '');
+    return base + '/folder/' + relative;
+  };
+
   const playUrl = async (url, title, artUrl) => {
     if (onBeforePlay) await onBeforePlay();
     setStatus('Playing: ' + title);
     try {
-      const res = await fetch('/upnp/play', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speakerIp, url, title, artUrl }),
-      });
-      const data = await res.json();
-      if (!data.ok) setStatus('Error: ' + data.error);
+      if (queueId && maFilesystemBase) {
+        // Play through MA/AirPlay using the filesystem URI
+        const ftpPath = new URL(url).searchParams.get('path');
+        const maUri = ftpToMaUri(ftpPath);
+        const res = await fetch('/ha/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queueId, uri: maUri }),
+        });
+        const data = await res.json();
+        if (!data.ok) setStatus('Error: ' + (data.error || 'unknown'));
+      } else {
+        const res = await fetch('/upnp/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speakerIp, url, title, artUrl }),
+        });
+        const data = await res.json();
+        if (!data.ok) setStatus('Error: ' + data.error);
+      }
     } catch (e) {
       setStatus('Error: ' + e.message);
     }
@@ -270,27 +345,40 @@ function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBefor
     if (onBeforePlay) await onBeforePlay();
     setStatus('Loading...');
     try {
-      const data = await fetch('/nas/browse?path=' + encodeURIComponent(folderPath)).then(r => r.json());
-      let files = data.files || [];
-      if (shuffle) files = shuffleArray(files);
-      if (!files.length) { setStatus('No audio files found'); return; }
-      const base = folderPath.replace(/\/$/, '');
-      const artUrl = data.artFile
-        ? serverBase + '/nas/art?path=' + encodeURIComponent(base + '/' + data.artFile)
-        : null;
-      const tracks = files.map(f => ({
-        url: serverBase + '/nas/stream?path=' + encodeURIComponent(base + '/' + f),
-        title: f.replace(/\.[^.]+$/, ''),
-        artUrl,
-      }));
-      const res = await fetch('/upnp/queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speakerIp, tracks }),
-      });
-      const d = await res.json();
-      if (!d.ok) setStatus('Error: ' + d.error);
-      else setStatus('Queue: ' + title + ' (' + tracks.length + ' tracks' + (shuffle ? ', shuffled' : '') + ')');
+      if (queueId && maFilesystemBase) {
+        // Play folder through MA using filesystem URI
+        const maUri = ftpToMaUri(folderPath);
+        const res = await fetch('/ha/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queueId, uri: maUri }),
+        });
+        const d = await res.json();
+        if (!d.ok) setStatus('Error: ' + (d.error || 'unknown'));
+        else { setStatus('Playing: ' + title); setTimeout(onClose, 800); }
+      } else {
+        const data = await fetch('/nas/browse?path=' + encodeURIComponent(folderPath)).then(r => r.json());
+        let files = data.files || [];
+        if (shuffle) files = shuffleArray(files);
+        if (!files.length) { setStatus('No audio files found'); return; }
+        const base = folderPath.replace(/\/$/, '');
+        const artUrl = data.artFile
+          ? serverBase + '/nas/art?path=' + encodeURIComponent(base + '/' + data.artFile)
+          : null;
+        const tracks = files.map(f => ({
+          url: serverBase + '/nas/stream?path=' + encodeURIComponent(base + '/' + f),
+          title: f.replace(/\.[^.]+$/, ''),
+          artUrl,
+        }));
+        const res = await fetch('/upnp/queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speakerIp, tracks }),
+        });
+        const d = await res.json();
+        if (!d.ok) setStatus('Error: ' + d.error);
+        else setStatus('Queue: ' + title + ' (' + tracks.length + ' tracks' + (shuffle ? ', shuffled' : '') + ')');
+      }
     } catch (e) {
       setStatus('Error: ' + e.message);
     }
@@ -400,8 +488,432 @@ function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBefor
   );
 }
 
+// ── WholeHouseView ────────────────────────────────────────────────────────────
+function WholeHouseView({ speakerData, maGroups, maTrackData, onClose }) {
+  const GROUP_COLORS = ['#3b82f6','#10b981','#a855f7','#f59e0b','#ef4444','#06b6d4','#f97316'];
+
+  // Map each speaker name → { color, isLeader, groupIdx }
+  const groupInfo = {};
+  maGroups.forEach(({ leader, members }, idx) => {
+    const color = GROUP_COLORS[idx % GROUP_COLORS.length];
+    groupInfo[leader] = { color, isLeader: true, idx };
+    members.forEach(m => { groupInfo[m] = { color, isLeader: false, idx }; });
+  });
+
+  const shortName = n => n.replace(/^Bose-/, '').replace(/^WiiM /, '');
+
+  const statusColor = (d) => {
+    if (!d) return '#1f2937';
+    if (d.playStatus === 'PLAY_STATE')  return '#22c55e';
+    if (d.playStatus === 'PAUSE_STATE') return '#f59e0b';
+    return '#374151';
+  };
+
+  const npLine = (spk, d) => {
+    const mt = maTrackData?.[spk.name];
+    if (mt?.track)                  return mt.track;
+    if (d?.nowPlaying?.stationName) return d.nowPlaying.stationName;
+    if (d?.nowPlaying?.track)       return d.nowPlaying.track;
+    if (d?.nowPlaying?.source && d.nowPlaying.source !== 'STANDBY') return d.nowPlaying.source;
+    return null;
+  };
+
+  // Sort so grouped speakers cluster together (by group index, leader first), then standalones
+  const origOrder = {};
+  SPEAKERS.forEach((s, i) => { origOrder[s.ip] = i; });
+
+  const sorted = [...SPEAKERS].sort((a, b) => {
+    const ga = groupInfo[a.name], gb = groupInfo[b.name];
+    if (ga && gb && ga.idx === gb.idx) {
+      if (ga.isLeader !== gb.isLeader) return ga.isLeader ? -1 : 1;
+      return origOrder[a.ip] - origOrder[b.ip];
+    }
+    if (ga && gb) return ga.idx - gb.idx;
+    if (ga) return -1;
+    if (gb) return 1;
+    return origOrder[a.ip] - origOrder[b.ip];
+  });
+
+  useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = ''; };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col" style={{ backgroundColor: '#080d18' }}>
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800 flex-shrink-0">
+        <span className="text-white font-semibold text-sm flex-shrink-0">All Rooms</span>
+        {/* Active group legend */}
+        {maGroups.length > 0 && (
+          <div className="flex items-center gap-3 flex-1 overflow-x-auto min-w-0">
+            {maGroups.map(({ leader, members }, idx) => (
+              <div key={idx} className="flex items-center gap-1.5 flex-shrink-0">
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: GROUP_COLORS[idx % GROUP_COLORS.length] }} />
+                <span className="text-slate-400 text-xs whitespace-nowrap">
+                  {shortName(leader)} +{members.length}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <button onClick={onClose} className="ml-auto text-slate-500 text-xl leading-none px-1 flex-shrink-0">✕</button>
+      </div>
+
+      {/* Speaker grid */}
+      <div className="flex-1 overflow-y-auto p-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {sorted.map(spk => {
+            const d    = speakerData[spk.ip];
+            const g    = groupInfo[spk.name];
+            const playing = d?.playStatus === 'PLAY_STATE';
+            const text = npLine(spk, d);
+            const vol  = d?.volume ?? null;
+
+            return (
+              <div key={spk.ip} className="rounded-xl p-3 relative"
+                style={{
+                  backgroundColor: g ? g.color + '14' : '#1e293b',
+                  borderTop: '3px solid ' + (g ? g.color : 'transparent'),
+                  opacity: d ? 1 : 0.35,
+                }}>
+                {/* Name + status dot */}
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: statusColor(d) }} />
+                  <span className="text-white text-xs font-semibold truncate flex-1">
+                    {shortName(spk.name)}
+                  </span>
+                  {g?.isLeader && (
+                    <span className="text-[9px] font-bold px-1 rounded flex-shrink-0"
+                      style={{ color: g.color, backgroundColor: g.color + '28' }}>
+                      LEAD
+                    </span>
+                  )}
+                </div>
+
+                {/* Now playing text */}
+                <div className="text-[11px] truncate mt-1" style={{ minHeight: '14px', color: playing ? '#94a3b8' : '#374151' }}>
+                  {text || ''}
+                </div>
+
+                {/* Volume bar */}
+                {vol !== null && (
+                  <div className="mt-2 flex items-center gap-1.5">
+                    <div className="flex-1 h-0.5 rounded-full" style={{ backgroundColor: '#1e293b' }}>
+                      <div className="h-full rounded-full"
+                        style={{
+                          width: vol + '%',
+                          backgroundColor: g ? g.color : '#3b82f6',
+                          opacity: playing ? 0.85 : 0.25,
+                        }} />
+                    </div>
+                    <span className="text-[10px] tabular-nums w-5 text-right"
+                      style={{ color: playing ? '#64748b' : '#1f2937' }}>
+                      {vol}
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Toggle switch ─────────────────────────────────────────────────────────────
+function Toggle({ on, onChange }) {
+  return (
+    <button
+      onPointerDown={(e) => { e.preventDefault(); onChange(!on); }}
+      className={'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none ' +
+        (on ? 'bg-blue-600' : 'bg-slate-600')}>
+      <span className={'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ' +
+        (on ? 'translate-x-6' : 'translate-x-1')} />
+    </button>
+  );
+}
+
+// ── SoundSettingsModal ────────────────────────────────────────────────────────
+// SoundTouch 300 uses undocumented endpoints — NOT the standard /bass endpoint.
+// Refs: /audioproducttonecontrols, /audioproductlevelcontrols, /audiospeakerattributeandsetting
+//       /audiodspcontrols, /productcechdmicontrol
+function SoundSettingsModal({ ip, speakerName, initialVolume, onVolumeChange, onClose }) {
+  const [volume, setVolume]               = useState(initialVolume || 0);
+  const [bass, setBass]                   = useState(0);
+  const [bassOn, setBassOn]               = useState(false);
+  const [treble, setTreble]               = useState(0);
+  const [surroundOn, setSurroundOn]       = useState(false);
+  const [surroundLevel, setSurroundLevel] = useState(0);
+  const [centerLevel, setCenterLevel]     = useState(0);
+  const [dialogMode, setDialogMode]       = useState(false);  // true = AUDIO_MODE_DIALOG
+  const [cecMode, setCecMode]             = useState('CEC_MODE_ON');
+  const [loading, setLoading]             = useState(true);
+  const bassTimer     = useRef(null);
+  const trebleTimer   = useRef(null);
+  const surroundTimer = useRef(null);
+  const centerTimer   = useRef(null);
+  const volTimer      = useRef(null);
+
+  useEffect(() => { document.body.style.overflow = 'hidden'; return () => { document.body.style.overflow = ''; }; }, []);
+
+  useEffect(() => {
+    async function load() {
+      const [toneRes, levelRes, attrRes, dspRes, cecRes] = await Promise.all([
+        apiGet(ip, '/audioproducttonecontrols'),
+        apiGet(ip, '/audioproductlevelcontrols'),
+        apiGet(ip, '/audiospeakerattributeandsetting'),
+        apiGet(ip, '/audiodspcontrols'),
+        apiGet(ip, '/productcechdmicontrol'),
+      ]);
+      if (toneRes) {
+        const x = new DOMParser().parseFromString(toneRes, 'text/xml');
+        setBass(parseInt(x.querySelector('bass')?.getAttribute('value') || '0'));
+        setTreble(parseInt(x.querySelector('treble')?.getAttribute('value') || '0'));
+      }
+      if (levelRes) {
+        const x = new DOMParser().parseFromString(levelRes, 'text/xml');
+        setSurroundLevel(parseInt(x.querySelector('rearSurroundSpeakersLevel')?.getAttribute('value') || '0'));
+        setCenterLevel(parseInt(x.querySelector('frontCenterSpeakerLevel')?.getAttribute('value') || '0'));
+      }
+      if (attrRes) {
+        const x = new DOMParser().parseFromString(attrRes, 'text/xml');
+        setBassOn(x.querySelector('subwoofer01')?.getAttribute('active') === 'true');
+        setSurroundOn(x.querySelector('rear')?.getAttribute('active') === 'true');
+      }
+      if (dspRes) {
+        const x = new DOMParser().parseFromString(dspRes, 'text/xml');
+        setDialogMode(x.querySelector('audiodspcontrols')?.getAttribute('audiomode') === 'AUDIO_MODE_DIALOG');
+      }
+      if (cecRes) {
+        const x = new DOMParser().parseFromString(cecRes, 'text/xml');
+        setCecMode(x.querySelector('productcechdmicontrol')?.getAttribute('cecmode') || 'CEC_MODE_ON');
+      }
+      setLoading(false);
+    }
+    load();
+  }, [ip]);
+
+  const handleVolume = (level) => {
+    const v = Math.max(0, Math.min(100, level));
+    setVolume(v);
+    clearTimeout(volTimer.current);
+    volTimer.current = setTimeout(() => onVolumeChange(ip, v, true), 150);
+  };
+
+  // Tone controls: step 25, range -100 to 100
+  const handleBass = (level) => {
+    const v = Math.max(-100, Math.min(100, Math.round(level / 25) * 25));
+    setBass(v);
+    clearTimeout(bassTimer.current);
+    bassTimer.current = setTimeout(() => {
+      apiPost(ip, '/audioproducttonecontrols',
+        '<audioproducttonecontrols><bass value="' + v + '" /></audioproducttonecontrols>');
+    }, 300);
+  };
+
+  const handleTreble = (level) => {
+    const v = Math.max(-100, Math.min(100, Math.round(level / 25) * 25));
+    setTreble(v);
+    clearTimeout(trebleTimer.current);
+    trebleTimer.current = setTimeout(() => {
+      apiPost(ip, '/audioproducttonecontrols',
+        '<audioproducttonecontrols><treble value="' + v + '" /></audioproducttonecontrols>');
+    }, 300);
+  };
+
+  const toggleBassOn = (next) => {
+    setBassOn(next);
+    apiPost(ip, '/audiospeakerattributeandsetting',
+      '<audiospeakerattributeandsetting><subwoofer01 active="' + next + '" /></audiospeakerattributeandsetting>');
+  };
+
+  const toggleSurroundOn = (next) => {
+    setSurroundOn(next);
+    apiPost(ip, '/audiospeakerattributeandsetting',
+      '<audiospeakerattributeandsetting><rear active="' + next + '" /></audiospeakerattributeandsetting>');
+  };
+
+  // Level controls: step 10, range -100 to 100
+  const handleSurroundLevel = (level) => {
+    const v = Math.max(-100, Math.min(100, Math.round(level / 10) * 10));
+    setSurroundLevel(v);
+    clearTimeout(surroundTimer.current);
+    surroundTimer.current = setTimeout(() => {
+      apiPost(ip, '/audioproductlevelcontrols',
+        '<audioproductlevelcontrols><rearSurroundSpeakersLevel value="' + v + '" /></audioproductlevelcontrols>');
+    }, 300);
+  };
+
+  const handleCenter = (level) => {
+    const v = Math.max(-100, Math.min(100, Math.round(level / 10) * 10));
+    setCenterLevel(v);
+    clearTimeout(centerTimer.current);
+    centerTimer.current = setTimeout(() => {
+      apiPost(ip, '/audioproductlevelcontrols',
+        '<audioproductlevelcontrols><frontCenterSpeakerLevel value="' + v + '" /></audioproductlevelcontrols>');
+    }, 300);
+  };
+
+  const toggleDialogMode = (next) => {
+    setDialogMode(next);
+    apiPost(ip, '/audiodspcontrols',
+      '<audiodspcontrols audiomode="' + (next ? 'AUDIO_MODE_DIALOG' : 'AUDIO_MODE_NORMAL') + '" />');
+  };
+
+  const selectCec = (mode) => {
+    setCecMode(mode);
+    apiPost(ip, '/productcechdmicontrol',
+      '<productcechdmicontrol cecmode="' + mode + '" />');
+  };
+
+  const sliderStyle = (val, min, max, disabled) => {
+    const pct    = Math.round(((val - min) / (max - min)) * 100);
+    const fill   = disabled ? '#475569' : '#3b82f6';
+    const track  = disabled ? '#1e293b' : '#334155';
+    return { background: `linear-gradient(to right, ${fill} 0%, ${fill} ${pct}%, ${track} ${pct}%, ${track} 100%)` };
+  };
+
+  const fmtVal   = (v) => v > 0 ? '+' + v : String(v);
+  const labelCls = 'text-slate-300 text-xs font-semibold uppercase tracking-wider';
+  const onOffCls = (on) => 'text-sm ' + (on !== false ? 'text-white' : 'text-slate-500');
+  const numCls   = (on) => 'text-sm tabular-nums w-10 text-right ' + (on !== false ? 'text-slate-300' : 'text-slate-600');
+  const rowCls   = (on) => 'flex items-center gap-2 ' + (on === false ? 'opacity-40 pointer-events-none' : '');
+  const btnCls   = 'w-8 h-8 flex items-center justify-center rounded bg-slate-700 active:bg-slate-500 text-white text-base font-mono leading-none flex-shrink-0 focus:outline-none select-none';
+
+  // Slider control: with toggle → header shows On/Off + switch, value moves to end of slider row
+  //                 without toggle → header shows value on right
+  const ControlRow = ({ label, value, min, max, step, onSlider, onMinus, onPlus, toggle, active }) => (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <span className={labelCls}>{label}</span>
+        {toggle && (
+          <div className="flex items-center gap-2">
+            <span className={onOffCls(active)}>{active !== false ? 'On' : 'Off'}</span>
+            {toggle}
+          </div>
+        )}
+      </div>
+      <div className={rowCls(active)}>
+        <button onClick={onMinus} className={btnCls}>−</button>
+        <input type="range" min={min} max={max} step={step || 1} value={value}
+          onChange={e => onSlider(parseInt(e.target.value))}
+          className="flex-1 h-2 rounded-full appearance-none cursor-pointer"
+          style={sliderStyle(value, min, max, active === false)} />
+        <button onClick={onPlus} className={btnCls}>+</button>
+        <span className={numCls(active)}>{fmtVal(value)}</span>
+      </div>
+    </div>
+  );
+
+  // Toggle-only row (no slider)
+  const ToggleRow = ({ label, on, onChange }) => (
+    <div className="flex items-center justify-between">
+      <span className={labelCls}>{label}</span>
+      <div className="flex items-center gap-2">
+        <span className={onOffCls(on)}>{on ? 'On' : 'Off'}</span>
+        <Toggle on={on} onChange={onChange} />
+      </div>
+    </div>
+  );
+
+  const CEC_MODES = [
+    ['CEC_MODE_ON',           'On'],
+    ['CEC_MODE_ALTERNATE_ON', 'Alt On'],
+    ['CEC_MODE_OFF',          'Off'],
+  ];
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50"
+         onClick={onClose}>
+      <div className="bg-slate-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm border border-slate-700 flex flex-col max-h-[96vh] sm:max-h-[90vh]"
+           onClick={e => e.stopPropagation()}>
+
+        {/* Header — fixed */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700 flex-shrink-0">
+          <div>
+            <h2 className="text-white font-semibold text-sm">Sound Settings</h2>
+            <p className="text-blue-400 text-xs">{speakerName}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-lg leading-none px-1">×</button>
+        </div>
+
+        {/* Scrollable content */}
+        {loading ? (
+          <div className="px-4 py-8 text-center text-slate-400 text-sm">Loading…</div>
+        ) : (
+          <div className="overflow-y-auto flex-1 px-4 py-5 space-y-5 pb-8">
+
+            {/* ── Levels ── */}
+            <ControlRow label="Volume"
+              value={volume} min={0} max={100}
+              onSlider={handleVolume}
+              onMinus={() => handleVolume(volume - 1)}
+              onPlus={() => handleVolume(volume + 1)} />
+
+            <ControlRow label="Bass"
+              value={bass} min={-100} max={100} step={25}
+              onSlider={handleBass}
+              onMinus={() => handleBass(bass - 25)}
+              onPlus={() => handleBass(bass + 25)}
+              active={bassOn}
+              toggle={<Toggle on={bassOn} onChange={toggleBassOn} />} />
+
+            <ControlRow label="Treble"
+              value={treble} min={-100} max={100} step={25}
+              onSlider={handleTreble}
+              onMinus={() => handleTreble(treble - 25)}
+              onPlus={() => handleTreble(treble + 25)} />
+
+            <ControlRow label="Surround"
+              value={surroundLevel} min={-100} max={100} step={10}
+              onSlider={handleSurroundLevel}
+              onMinus={() => handleSurroundLevel(surroundLevel - 10)}
+              onPlus={() => handleSurroundLevel(surroundLevel + 10)}
+              active={surroundOn}
+              toggle={<Toggle on={surroundOn} onChange={toggleSurroundOn} />} />
+
+            <ControlRow label="Center"
+              value={centerLevel} min={-100} max={100} step={10}
+              onSlider={handleCenter}
+              onMinus={() => handleCenter(centerLevel - 10)}
+              onPlus={() => handleCenter(centerLevel + 10)} />
+
+            {/* ── Audio ── */}
+            <div className="border-t border-slate-700/60 pt-5">
+              <ToggleRow label="Dialog Mode" on={dialogMode} onChange={toggleDialogMode} />
+            </div>
+
+            {/* ── HDMI ── */}
+            <div className="border-t border-slate-700/60 pt-5">
+              <div className="flex items-center justify-between mb-2">
+                <span className={labelCls}>HDMI-CEC</span>
+                <span className="text-slate-400 text-xs">{CEC_MODES.find(([m]) => m === cecMode)?.[1] ?? cecMode}</span>
+              </div>
+              <div className="flex gap-1.5">
+                {CEC_MODES.map(([mode, label]) => (
+                  <button key={mode} onClick={() => selectCec(mode)}
+                    className={'flex-1 py-2 rounded-lg text-xs font-medium select-none ' +
+                      (cecMode === mode
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-700 text-slate-400 active:bg-slate-600 active:text-white')}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
@@ -424,8 +936,43 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   const [artModal, setArtModal] = useState(false);
   const [favStatus, setFavStatus] = useState(null);
   const [radioBrowser, setRadioBrowser] = useState(false);
+  const [soundSettingsSpk, setSoundSettingsSpk] = useState(null);
   const [upnpRepeatLocal, setUpnpRepeatLocal] = useState(master?.upnpRepeat || 'REPEAT_OFF');
+  const [tvResetBusy, setTvResetBusy] = useState(false);
   const timerRef = useRef(null);
+  const adoptedRef = useRef(false);
+  const maybeAdopt = async () => {
+    if (!group.phantomGroup || adoptedRef.current) return;
+    adoptedRef.current = true;
+    if (onAdoptPhantomGroup) await onAdoptPhantomGroup(group);
+  };
+
+  const resetTvAudio = async (ip) => {
+    setTvResetBusy(true);
+    let appleTvWasActive = false;
+    if (master?.nowPlaying?.source === 'PRODUCT') {
+      const tvState = await fetch('/ha/tv-state').then(r => r.json()).catch(() => null);
+      appleTvWasActive = !!(tvState?.tv?.appleTV);
+    }
+    try {
+      await apiPost(ip, '/key', '<key state="press" sender="Gabbo">POWER</key>');
+      await new Promise(r => setTimeout(r, 100));
+      await apiPost(ip, '/key', '<key state="release" sender="Gabbo">POWER</key>');
+      await new Promise(r => setTimeout(r, 5000));
+      if (appleTvWasActive) {
+        await fetch('/ha/appletv-on', { method: 'POST' });
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      // Select TV source — Bose auto-powers-on when a source is selected from standby
+      await fetch('/api/' + ip + '/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/xml' },
+        body: '<ContentItem source="PRODUCT" sourceAccount="TV"></ContentItem>',
+      });
+    } finally {
+      setTvResetBusy(false);
+    }
+  };
 
   useEffect(() => { setUpnpRepeatLocal(master?.upnpRepeat || 'REPEAT_OFF'); }, [master?.upnpRepeat]);
 
@@ -443,6 +990,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   };
 
   const handlePlayFavorite = async (fav) => {
+    await maybeAdopt();
     const queueId = (master?.name && haConfig?.speakerQueues?.[master.name]) || fav.defaultQueueId;
     setFavStatus('Starting ' + fav.name + '...');
     try {
@@ -479,7 +1027,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
       {hasContent && (
         <div className="p-4 border-b border-slate-700">
           <div className="flex items-start gap-3">
-            {effectiveArt && effectiveArt.startsWith('http') && (
+            {effectiveArt && (
               <img src={effectiveArt} key={effectiveArt} alt="Art"
                    onClick={() => setArtModal(true)}
                    className="w-16 h-16 rounded-lg object-cover flex-shrink-0 cursor-pointer hover:opacity-80 transition-opacity"/>
@@ -500,7 +1048,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                   <span className="text-slate-400 text-xs">{maTrack.stationName}</span>
                 )}
                 {np.sourceAccount && np.source !== 'STORED_MUSIC' && np.sourceAccount !== 'AirPlay2DefaultUserName' && !/upnp/i.test(np.sourceAccount) && !/^[a-f0-9-]{10,}$/i.test(np.sourceAccount) && (
-                  <span className="text-slate-500 text-xs truncate">{np.sourceAccount}</span>
+                  <span className="text-slate-500 text-xs truncate">{np.sourceAccount.replace(/--[A-Za-z0-9]+$/, '')}</span>
                 )}
               </div>
               {np.stationName && (
@@ -559,6 +1107,13 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         </div>
       )}
 
+      {/* Phantom group banner */}
+      {group.phantomGroup && (
+        <div className="px-4 py-2 bg-violet-900/30 border-t border-violet-700/30 flex items-center gap-2">
+          <span className="text-violet-300 text-xs">Synced via AirPlay externally</span>
+        </div>
+      )}
+
       {/* ── Speakers ── */}
       <div className="divide-y divide-slate-700/60">
         {group.speakers.map(spk => (
@@ -570,6 +1125,22 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                 <span className="text-white text-base font-semibold block">{spk.name}</span>
                 <span className="text-slate-500 text-[11px] block">{spk.ip}</span>
               </div>
+              {spk.reachable && spk.name === 'Bose-Sunroom 300' && (
+                <>
+                  <button onClick={() => resetTvAudio(spk.ip)}
+                    disabled={tvResetBusy}
+                    title="Reset TV audio (power cycle + restore TV source)"
+                    className={'p-1.5 rounded-lg transition flex-shrink-0 ' +
+                      (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-700')}>
+                    {tvResetBusy ? '…' : '↺'}
+                  </button>
+                  <button onClick={() => setSoundSettingsSpk(spk)}
+                    title="Sound settings"
+                    className="p-1.5 rounded-lg transition flex-shrink-0 text-slate-500 hover:text-white hover:bg-slate-700">
+                    ⚙
+                  </button>
+                </>
+              )}
               {spk.reachable && (
                 <button onClick={() => onKey(spk.ip, 'POWER')}
                   title={spk.nowPlaying?.source === 'STANDBY' ? 'Power on' : 'Power off'}
@@ -620,9 +1191,9 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                   )}
 
                   {/* Remove button */}
-                  {group.speakers.length > 1 && (
+                  {group.speakers.length > 1 && !group.phantomGroup && (
                     <button onClick={() => {
-                      if (group.maMembers?.includes(spk.name)) {
+                      if (spk.brand === 'wiim' || group.maMembers?.includes(spk.name)) {
                         onMaGroupRemove(spk.name);
                       } else {
                         onRemoveFromGroup(group.masterIp, spk.ip);
@@ -639,9 +1210,9 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         ))}
       </div>
 
-      {/* Pandora */}
+      {/* Music Assistant */}
       <div className="px-4 py-3 border-t border-slate-700/60">
-        <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Pandora</h3>
+        <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Music Assistant</h3>
         <div className="flex gap-1.5 flex-wrap items-center">
           <button onClick={() => setRadioBrowser(true)}
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
@@ -682,12 +1253,12 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
             </button>
             <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
           </>)}
-          <button onClick={() => onOpenNas()}
+          <button onClick={async () => { await maybeAdopt(); onOpenNas(); }}
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
             Browse
           </button>
           <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
-          <button onClick={() => onPlayNasFolder(group.masterIp, "/volume1/music/_Children/GabbyCat")}
+          <button onClick={async () => { await maybeAdopt(); onPlayNasFolder(group.masterIp, "/volume1/music/_Children/GabbyCat"); }}
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
             🪆 Gabby's
           </button>
@@ -695,12 +1266,13 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
       </div>
 
       {/* Presets */}
-      {master.presets && master.presets.length > 0 && (
+      {master.presets && master.presets.length > 0 && !(isAirplay && group.speakers.some(s => s.brand === 'wiim')) && (
         <div className="px-4 py-3 border-t border-slate-700/60">
           <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Bose Presets</h3>
           <div className="flex gap-1 flex-wrap">
             {master.presets.map(preset => (
               <button key={preset.id} onClick={async () => {
+                await maybeAdopt();
                 await onEstablishBoseZone(group.masterIp);
                 onKey(group.masterIp, 'PRESET_' + preset.id);
               }}
@@ -712,27 +1284,6 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         </div>
       )}
 
-      {groups.filter(g => g.id !== group.id).length > 0 && (
-        <div className="px-4 py-3 border-t border-slate-700/60">
-          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Sync To</h3>
-          <div className="flex flex-wrap gap-2">
-            {groups.filter(g => g.id !== group.id).map(g => {
-              const gMaster = g.speakers.find(s => s.ip === g.masterIp) || g.speakers[0];
-              const isSelected = pendingGroups?.[g.masterIp]?.has(group.masterIp);
-              return (
-                <button key={g.id}
-                  onClick={() => onTogglePendingMember(g.masterIp, group.masterIp)}
-                  className={'px-2 py-1 rounded text-xs transition ' +
-                    (isSelected
-                      ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                      : 'bg-slate-700 hover:bg-slate-600 text-slate-200')}>
-                  {gMaster?.name || g.masterIp}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {otherSpeakers && otherSpeakers.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-700/60">
@@ -742,11 +1293,13 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
               const isSelected = pendingGroups?.[group.masterIp]?.has(spk.ip);
               return (
                 <button key={spk.ip}
-                  onClick={() => {
+                  onClick={async () => {
                     const willAdd = !isSelected;
                     onTogglePendingMember(group.masterIp, spk.ip);
-                    // If already playing and adding a speaker, join immediately
-                    if (willAdd && !isStandby) onJoinNow(group.masterIp, spk.ip);
+                    if (willAdd && !isStandby) {
+                      const err = await onJoinNow(group.masterIp, spk.ip);
+                      if (err) setFavStatus('Join failed: ' + err);
+                    }
                   }}
                   className={'px-2 py-1 rounded text-xs transition ' +
                     (isSelected
@@ -761,13 +1314,29 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
       )}
 
 
-      {/* Radio browser modal */}
+      {/* MA library browser modal */}
       {radioBrowser && (
-        <RadioBrowserModal
+        <MABrowserModal
           speakerName={master?.name || group.masterIp}
           queueId={haConfig?.speakerQueues?.[master?.name] || haConfig?.queues?.airplayGroup}
           onClose={() => setRadioBrowser(false)}
-          onBeforePlay={() => onEstablishGroup(group.masterIp)}
+          onBeforePlay={async () => { await maybeAdopt(); await onEstablishGroup(group.masterIp); }}
+          onFilesystem={(fsUri) => {
+            setRadioBrowser(false);
+            const queueId = haConfig?.speakerQueues?.[master?.name];
+            onOpenNas(undefined, { queueId, maFilesystemBase: fsUri });
+          }}
+        />
+      )}
+
+      {/* Sound settings modal */}
+      {soundSettingsSpk && (
+        <SoundSettingsModal
+          ip={soundSettingsSpk.ip}
+          speakerName={soundSettingsSpk.name}
+          initialVolume={soundSettingsSpk.volume}
+          onVolumeChange={onVolumeChange}
+          onClose={() => setSoundSettingsSpk(null)}
         />
       )}
 
@@ -840,6 +1409,7 @@ function AllSpeakersView() {
   const [maTrackData, setMaTrackData] = useState({}); // speakerName → { track, artist, art }
   const [tvState, setTvState] = useState(null);
   const [pendingGroups, setPendingGroups] = useState({});
+  const [showWholeHouse, setShowWholeHouse] = useState(false);
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
 
@@ -998,13 +1568,41 @@ function AllSpeakersView() {
     // Remove any card whose master IP is an MA group member (absorbed into leader)
     const merged = result.filter(g => !maGroupedIps.has(g.masterIp));
 
+    // Detect phantom groups: standalone speakers playing the same AirPlay track in sync
+    const phantomGroupedIps = new Set();
+    const trackBuckets = {};
+    merged.forEach(g => {
+      if (g.speakers.length !== 1) return;
+      const np = g.speakers[0].nowPlaying;
+      if (!np || np.source !== 'AIRPLAY' || !np.track || !np.artist) return;
+      const key = `${np.artist}|${np.track}`;
+      (trackBuckets[key] = trackBuckets[key] || []).push(g);
+    });
+    Object.values(trackBuckets).forEach(bucket => {
+      if (bucket.length < 2) return;
+      const positions = bucket.map(g => g.speakers[0].nowPlaying?.position ?? 0);
+      const anyNonZero = positions.some(p => p > 0);
+      if (anyNonZero) {
+        const base = positions[0];
+        if (!positions.every(p => Math.abs(p - base) < 15)) return;
+      }
+      const leader = bucket[0];
+      leader.phantomGroup = true;
+      leader.phantomMembers = bucket.slice(1).map(g => g.speakers[0].name);
+      bucket.slice(1).forEach(g => {
+        phantomGroupedIps.add(g.masterIp);
+        g.speakers.forEach(s => { if (!leader.speakers.find(ls => ls.ip === s.ip)) leader.speakers.push(s); });
+      });
+    });
+    const finalMerged = merged.filter(g => !phantomGroupedIps.has(g.masterIp));
+
     // Sort: fixed order matching constants.js (always, regardless of discovery order)
     const ipOrder = {};
     SPEAKERS.forEach((s, i) => { ipOrder[s.ip] = i; });
     const groupRank = g => Math.min(...g.speakers.map(s => ipOrder[s.ip] ?? 999));
-    merged.sort((a, b) => groupRank(a) - groupRank(b));
+    finalMerged.sort((a, b) => groupRank(a) - groupRank(b));
 
-    return merged;
+    return finalMerged;
   }, [speakerData, maGroups]);
 
   const getDeviceId = async (ip) => {
@@ -1111,6 +1709,11 @@ function AllSpeakersView() {
       '</zone>';
 
     await apiPost(masterIp, '/removeZoneSlave', xml);
+    setPendingGroups(prev => {
+      const next = {};
+      for (const [k, v] of Object.entries(prev)) { const s = new Set(v); s.delete(removeIp); if (s.size) next[k] = s; }
+      return next;
+    });
     setTimeout(pollAll, 1200);
   };
 
@@ -1243,11 +1846,28 @@ function AllSpeakersView() {
   };
 
   const onMaGroupRemove = (speakerName) => {
+    const memberIp = speakers.find(s => s.name === speakerName)?.ip;
+    if (memberIp) setPendingGroups(prev => {
+      const next = {};
+      for (const [k, v] of Object.entries(prev)) { const s = new Set(v); s.delete(memberIp); if (s.size) next[k] = s; }
+      return next;
+    });
     fetch('/ha/group-remove', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ speakerName }),
     }).then(() => setTimeout(() => { fetchMaGroups(); pollAll(); }, 1000));
+  };
+
+  const adoptPhantomGroup = async (group) => {
+    const leaderName = group.speakers[0]?.name;
+    const memberNames = group.phantomMembers || [];
+    if (!leaderName || !memberNames.length || !haConfig?.speakerEntities?.[leaderName]) return;
+    const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const wiimIps = group.speakers.filter(s => s.brand === 'wiim').map(s => s.ip);
+    if (wiimIps.length) await Promise.allSettled(wiimIps.map(ip => post('/wiim/ungroup', { ip })));
+    await post('/ha/group-include', { masterName: leaderName, speakerNames: memberNames });
+    setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
   };
 
   const onMaStop = (speakerIp) => {
@@ -1261,24 +1881,76 @@ function AllSpeakersView() {
     }).then(() => setTimeout(pollAll, 1000));
   };
 
+  // Stop queue, join new speaker, wait for AirPlay group to form, restart station
+  const doStopJoinRestart = async (leaderIp, memberIp, leaderName, memberName, queueId, stationUri) => {
+    const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    // Stop+restart is optional — controlled by haConfig.features.stopRestartOnGroupJoin.
+    // When disabled, MA's own late-joiner sync handles it. When enabled, we stop the queue,
+    // join, then replay the station URI so the new member starts from the same point.
+    const doStopRestart = haConfig?.features?.stopRestartOnGroupJoin === true;
+    if (doStopRestart && queueId && stationUri) {
+      await post('/ha/stop', { queueId });
+      await post('/ha/clear', { queueId });
+    } else if (doStopRestart && queueId && !stationUri) {
+      console.warn('[doStopJoinRestart] stopRestartOnGroupJoin enabled but no stationUri — joining without restart');
+    }
+    // Before AirPlay grouping: dissolve any native WiiM multiroom groups the speakers are in.
+    // A WiiM locked in a native group won't respond correctly to MA AirPlay grouping.
+    const wiimsToUngroup = [leaderIp, memberIp].filter(wip => speakerData[wip]?.brand === 'wiim');
+    if (wiimsToUngroup.length > 0) {
+      await Promise.allSettled(wiimsToUngroup.map(wip => post('/wiim/ungroup', { ip: wip })));
+    }
+    try {
+      const res = await post('/ha/group-include', { masterName: leaderName, speakerNames: [memberName] });
+      const d = await res.json();
+      if (!d.ok) console.error('[doStopJoinRestart] group-include failed:', d.error);
+    } catch (e) { console.warn('[doStopJoinRestart] error:', e); }
+    if (doStopRestart && queueId && stationUri) {
+      await new Promise(r => setTimeout(r, 500));
+      await post('/ha/play', { queueId, uri: stationUri });
+    }
+    setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
+  };
+
   const joinSpeakerNow = async (leaderIp, memberIp) => {
     const leaderName = speakerData[leaderIp]?.name;
     const memberName = speakerData[memberIp]?.name;
     const leaderSource = speakerData[leaderIp]?.nowPlaying?.source;
     const hasWiiM = speakerData[memberIp]?.brand === 'wiim' || speakerData[leaderIp]?.brand === 'wiim';
-    if (leaderName && memberName && haConfig?.speakerEntities?.[leaderName]) {
-      await fetch('/ha/group-include', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ masterName: leaderName, speakerNames: [memberName] }),
-      }).catch(e => console.warn('[joinSpeakerNow] MA error:', e));
+
+    if (leaderName && memberName && haConfig?.speakerEntities?.[leaderName] &&
+        (leaderSource === 'AIRPLAY' || leaderSource === 'AUX')) {
+      const queueId = haConfig?.speakerQueues?.[leaderName];
+      // Fetch the station URI: prefer in-memory map (exact URI used at play time),
+      // fall back to current queue item URI (survives server restarts)
+      let stationUri = null;
+      if (queueId) {
+        try {
+          const r = await fetch('/ha/station-uri?queueId=' + encodeURIComponent(queueId));
+          const d = await r.json();
+          stationUri = d.uri || null;
+        } catch (e) { console.warn('[joinSpeakerNow] station-uri fetch failed:', e); }
+        if (!stationUri) {
+          try {
+            const r2 = await fetch('/ha/queue-uri?queueId=' + encodeURIComponent(queueId));
+            const d2 = await r2.json();
+            stationUri = d2.uri || null;
+            if (stationUri) console.log('[joinSpeakerNow] using queue-uri fallback:', stationUri);
+          } catch (e) { console.warn('[joinSpeakerNow] queue-uri fallback failed:', e); }
+        }
+      }
+      return await doStopJoinRestart(leaderIp, memberIp, leaderName, memberName, queueId, stationUri)
+        .then(() => null)
+        .catch(e => e.message);
+    } else if (leaderName && !haConfig?.speakerEntities?.[leaderName]) {
+      console.warn('[joinSpeakerNow] no HA entity for leader:', leaderName);
     }
-    // Only set up Bose zone for non-AirPlay sources — zone setup while on AirPlay
-    // interferes with the AirPlay stream and prevents the speaker from joining
+    // Only set up Bose zone for non-AirPlay sources
     if (!hasWiiM && leaderSource !== 'AIRPLAY' && leaderSource !== 'AUX') {
       await addSpeakerToGroup(leaderIp, memberIp);
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);
+    return null;
   };
 
   const togglePendingMember = (leaderIp, memberIp) => {
@@ -1413,6 +2085,13 @@ function AllSpeakersView() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {haConfig?.features?.wholeHouseOverview && (
+              <button onClick={() => setShowWholeHouse(true)}
+                title="All rooms overview"
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
+                ⊞ Rooms
+              </button>
+            )}
             <button onClick={() => window.location.reload()}
               className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
               Refresh
@@ -1439,7 +2118,7 @@ function AllSpeakersView() {
                 otherSpeakers={speakers.filter(s => !group.speakers.some(gs => gs.ip === s.ip))}
                 speakerData={speakerData}
                 groups={groups}
-                onOpenNas={(path) => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp, initialPath: path })}
+                onOpenNas={(path, opts) => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp, initialPath: path, ...(opts || {}) })}
                 onPlayNasFolder={playNasFolder}
                 onMaStop={onMaStop}
                 onMaGroupRemove={onMaGroupRemove}
@@ -1451,6 +2130,7 @@ function AllSpeakersView() {
                 onEstablishGroup={establishGroup}
                 onEstablishBoseZone={establishBoseZone}
                 onJoinNow={joinSpeakerNow}
+                onAdoptPhantomGroup={adoptPhantomGroup}
               />
             );
           })}
@@ -1469,13 +2149,24 @@ function AllSpeakersView() {
 
       </div>
 
+      {showWholeHouse && (
+        <WholeHouseView
+          speakerData={speakerData}
+          maGroups={maGroups}
+          maTrackData={maTrackData}
+          onClose={() => setShowWholeHouse(false)}
+        />
+      )}
+
       {nasBrowser && (
         <NasBrowserModal
           speakerIp={nasBrowser.ip}
           speakerName={nasBrowser.name}
           initialPath={nasBrowser.initialPath}
+          queueId={nasBrowser.queueId}
+          maFilesystemBase={nasBrowser.maFilesystemBase}
           onClose={() => setNasBrowser(null)}
-          onBeforePlay={() => establishBoseZone(nasBrowser.ip)}
+          onBeforePlay={() => nasBrowser.queueId ? Promise.resolve() : establishBoseZone(nasBrowser.ip)}
         />
       )}
     </div>

@@ -6,7 +6,7 @@ A custom Bose SoundTouch controller built to replace functionality lost as Bose 
 
 **Deployment target:** Docker container running as a local HA add-on inside Home Assistant OS on Raspberry Pi.
 
-**Critical deadline:** Bose cloud shuts down **May 6, 2026** — presets pointing to cloud sources (Pandora, internet radio via Bose servers) will stop working after that date.
+**Status (May 2026):** Bose cloud shut down **May 6, 2026**. Cloud-dependent presets (Pandora, TuneIn internet radio) show `INVALID_SOURCE` when pressed. Pandora playback via the Bose app is dead. All functionality now routes through MA (AirPlay) or local UPnP. The app is the primary interface.
 
 ---
 
@@ -101,6 +101,8 @@ Key sections:
 - `favorites` — list of `{ name, icon, uri, defaultQueueId }` shown as one-tap play buttons
 - `groupSideEffects` — rules that flip HA switches when specific speakers are grouped/ungrouped
 - `playRedirects` — intercepts `/ha/play` for speakers needing special routing (e.g. Bedroom → Belkin AUX)
+- `presetActions` — maps speaker name → preset ID → MA URI. When a Bose preset button fires `nowSelectionUpdated`, this is checked first for an instant MA play. Example: `{ "Bose-Bathroom": { "5": "library://radio/1" } }`
+- `invalidSourceFallback` — `{ "uri": "..." }` — polling fallback for any dead preset not in `presetActions`. Per-speaker override: `"Bose-Joshua": { "uri": "..." }` nested inside.
 
 **MA API details (confirmed working):**
 - REST endpoint: `POST http://localhost:8095/api` with `{ command, args }` and Bearer MA token
@@ -138,12 +140,12 @@ Key sections:
 | Speaker Name (Bose /info) | IP | MA Queue ID | HA Entity ID | Notes |
 |---|---|---|---|---|
 | Bose-Sunroom 300 | 192.168.1.229 | upb0d5cccfcf13 | media_player.bose_sunroom_300_6 | |
-| Bose-Living Room | 192.168.1.171 | up304511da849b | media_player.bose_living_room_6 | |
+| Bose-Living Room | 192.168.1.170 | up304511da849b | media_player.bose_living_room_6 | was .171 |
 | Bose-Kitchen | 192.168.1.185 | upf8369b11ce57 | media_player.bose_kitchen_6 | |
-| Bose-Office | 192.168.1.162 | upf45eab9402de | media_player.bose_office_6 | |
-| Bose-Bathroom | 192.168.1.117 | upf0b5d19709fc | media_player.bose_bathroom_6 | |
+| Bose-Office | 192.168.1.161 | upf45eab9402de | media_player.bose_office_6 | was .162 |
+| Bose-Bathroom | 192.168.1.245 | upf0b5d19709fc | media_player.bose_bathroom_6 | was .120 |
 | Bose-Rosemary | 192.168.1.40 | up5cf821f13410 | media_player.bose_rosemary_6 | |
-| Bose-Joshua | 192.168.1.91 | upb0d5cc50ef39 | media_player.bose_joshua_6 | |
+| Bose-Joshua | 192.168.1.92 | upb0d5cc50ef39 | media_player.bose_joshua_6 | was .91 |
 | Bose-Bedroom | 192.168.1.176 | up04a316bee3e0 | media_player.bose_bathroom2* | No native AirPlay — see below |
 | Bose-Dining Room | 192.168.1.55 | up3881d72fc987 | media_player.bose_dining_room_6 | |
 | Bose-Patio | 192.168.1.7 | upd8a98bcbc0f6 | media_player.bose_patio_6 | |
@@ -195,12 +197,24 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 - **CRLF:** Windows line endings break HA Supervisor YAML parsing — always fix with `sed -i 's/\r//'`
 - **`ha addons` is deprecated** — use `ha apps` instead
 - **network_mode: host** — required for SSDP multicast to work inside Docker
-- **haConfig.json** is git-ignored but IS deployed by deploy.sh (not in the exclude list). The Pi's copy is the authoritative one; local edits deploy on next `./deploy.sh`
+- **haConfig.json** is git-ignored and IS excluded from deploy.sh. Must be deployed separately: `ssh -p 22222 root@homeassistant "cat > /addons/localsoundtouch/haConfig.json" < haConfig.json` followed by `ha apps rebuild local_localsoundtouch`. The Pi's copy is authoritative.
 - **MA reachable as `localhost`** — MA runs on the same Pi; Docker host networking makes `localhost:8095` work
 
 ---
 
 ## Future TODOs
+
+### TV Card: Episode Synopsis via TMDB/IMDb
+
+The Apple TV entity in HA exposes `media_title`, `media_series_title`, `media_season`, `media_episode`, and artwork — but no synopsis. Apple's MRP protocol doesn't broadcast episode descriptions.
+
+Synopsis is available from:
+- **TMDB API** (free tier, requires API key) — search by title, returns `overview` field
+- **IMDb** — episode pages carry synopsis (e.g. `https://www.imdb.com/title/tt27544465/`) but no official free API; scraping or a third-party wrapper would be needed
+
+Implementation approach: in the `/ha/tv-state` handler, after fetching the Apple TV entity state, do a TMDB title search using `media_title` (plus series/season/episode if available) and append the `overview` to the response. Add a `tmdbApiKey` field to `haConfig.json`.
+
+---
 
 ### Test Cases
 
@@ -329,14 +343,110 @@ WiiM devices are excellent UPnP renderers — NAS/UPnP playback stack works unch
 
 ### Server-side WebSocket subscription (queue improvement)
 **Current:** queue advances by polling `GetTransportInfo` every 3s via UPnP SOAP.  
-**Better:** open a WebSocket connection from Node.js server to each speaker at `ws://<ip>:8080` and listen for `nowPlayingUpdated` events. When `playStatus` becomes `STOP_STATE` (source=UPnP), advance the queue immediately.  
-**Why not done yet:** requires implementing WebSocket client handshake in Node.js `net` module (~50 lines) since we avoid npm. Low priority — 3s polling works fine on Raspberry Pi.
+**Better:** use the existing boseWatcher WebSocket connection (already open on all 10 speakers) and listen for `nowPlayingUpdated` where `playStatus = STOP_STATE` and source=UPnP. Advance the queue immediately instead of waiting up to 3s.  
+**Status:** boseWatcher WebSocket is implemented and connected — adding UPnP queue advancement is a small extension to `handleWsEvent`.
 
 ### HA Ingress / HTTPS
 Currently plain HTTP on LAN. Options: HA Ingress (HTTPS via HA's reverse proxy, but requires iframe-compatible UI), or Caddy/nginx on Pi. Not urgent.
 
 ### Scheduled playback / alarms
 Post-May-6 stretch goal.
+
+---
+
+## Bose Cloud Shutdown — Post May 2026
+
+### What died on May 6, 2026
+- Pandora, TuneIn, Amazon Music via Bose presets
+- Official Bose SoundTouch app (limited functionality only)
+- Cloud-based preset content: pressing a TuneIn/Pandora preset shows `INVALID_SOURCE`
+- `LOCAL_INTERNET_RADIO` source via `/select` — speaker accepts the request but never fetches the descriptor URL (cloud was the resolver, not the speaker itself)
+
+### What still works locally
+- All Bose REST API endpoints (port 8090): now-playing, volume, zones, presets (read), key presses
+- UPnP/NAS playback (unaffected — was always local)
+- AirPlay via MA (unaffected — runs on Pi via HA)
+- Pandora via MA (MA uses its own Pandora auth, independent of Bose cloud)
+- Physical preset buttons still fire `nowSelectionUpdated` WebSocket events
+
+### 99.5 WCRB Radio
+WCRB was the primary dead preset (preset 5 on all speakers). It's been replaced via MA:
+
+- **MA library URI:** `library://radio/1` — already in the user's MA library as "WCRB"
+- **RadioBrowser UUID:** `b536a4b6-1b26-44af-bac3-0deb55f997bb` (MA URI: `radiobrowser://radio/b536a4b6-1b26-44af-bac3-0deb55f997bb`)
+- **Stream:** `https://wgbh-live.streamguys1.com/classical-hi` — 192 kbps MP3, WGBH/classical-hi feed
+- **In haConfig.favorites:** `{ "name": "99.5 WCRB", "icon": "🎼", "uri": "library://radio/1" }` — appears as one-tap button in every speaker card
+
+### boseWatcher.js — Preset Intercept System
+
+**File:** `boseWatcher.js` (fallback: `boseWatcher.polling.js`)
+
+Runs two parallel mechanisms per speaker:
+
+#### 1. WebSocket (primary — instant)
+Opens a persistent WebSocket connection to each speaker on port 8080.
+
+**Critical handshake requirements** (discovered empirically — libwebsockets on Bose rejects without these):
+```
+GET / HTTP/1.1                          ← path is /, NOT /WebSocket
+Host: <ip>:8080
+User-Agent: LocalSoundTouch/1.0        ← REQUIRED — connection silently closed without it
+Accept: */*                            ← REQUIRED — connection silently closed without it
+Upgrade: websocket
+Origin: http://<ip>:8080
+Sec-WebSocket-Key: <base64>
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Protocol: gabbo
+Connection: Upgrade
+```
+
+Speaker responds with `HTTP/1.1 101` + immediately sends:
+```xml
+<SoundTouchSdkInfo serverVersion="4" serverBuild="trunk r46330 v4 epdbuild hepdswbld04" />
+```
+
+**Events handled:**
+- `nowSelectionUpdated` — fires the instant a preset button is pressed (before cloud attempt). Contains `<preset id="N">`. Looks up `haConfig.presetActions[speakerName][presetId]` and plays via `/ha/play`.
+- `nowPlayingUpdated` — not currently acted on (previously used for source tracking; removed when polling got its own state).
+
+**Reconnect:** 20s after disconnect.
+
+#### 2. HTTP polling (fallback — ~15s latency)
+Polls `/now_playing` on each speaker every 15s. Detects `INVALID_SOURCE` transition (speaker stuck in cloud-failed state). Plays `haConfig.invalidSourceFallback.uri` on the speaker's MA queue. Uses its own `prev` variable independent of WebSocket state.
+
+#### haConfig fields
+```json
+"presetActions": {
+  "Bose-Bathroom":    { "5": "library://radio/1" },
+  "Bose-Joshua":      { "5": "library://radio/1" },
+  "Bose-Rosemary":    { "5": "library://radio/1" },
+  "Bose-Sunroom 300": { "5": "library://radio/1" },
+  "Bose-Living Room": { "5": "library://radio/1" },
+  ...all 10 speakers...
+},
+"invalidSourceFallback": { "uri": "library://radio/1" }
+```
+
+#### When Pandora eventually dies
+Add presets 3 and 4 to `presetActions`:
+```json
+"3": "library://radio/5",   ← Yo-Yo Ma Radio (MA Pandora station)
+"4": "library://radio/2"    ← Radiohead Radio (MA Pandora station)
+```
+These MA library URIs are already confirmed working.
+
+### WebSocket API findings (from SoundTouch-Web-API.pdf)
+
+Key events:
+| Event | When it fires |
+|-------|--------------|
+| `nowSelectionUpdated` | Preset button pressed — contains `<preset id="N">`. Fires BEFORE cloud attempt. |
+| `nowPlayingUpdated` | Source/track changes — contains full `<nowPlaying source="...">` |
+| `presetsUpdated` | Preset slots modified |
+| `volumeUpdated` | Volume changed |
+| `zoneUpdated` | Zone/group changed |
+
+`nowSelectionUpdated` is the key event for preset interception — it fires immediately on button press and includes the preset ID, unlike `nowPlayingUpdated` which only fires after the cloud attempt starts (and shows `INVALID_SOURCE` if it fails).
 
 ---
 
@@ -362,3 +472,10 @@ Post-May-6 stretch goal.
 | `upapf4e11ee0766b` for Bathroom queue | Wrong MAC-derived ID — actual MA queue is `upf0b5d19709fc` |
 | `upcc4b73fe2466` for Belkin queue | This queue disappeared from MA — correct Belkin queue is `upuuidff970010315bf140af4f0142ff970010` |
 | `members[0] === entity_id` leader detection | Breaks for Joshua/Rosemary where leader lists only members (not self). Use "has other known entities" + dedup instead |
+| `POST /presets` to reprogram preset 5 | Returns `CLIENT_XML_ERROR` for all formats tried. Preset writes appear to require the cloud protocol, not the local REST API. Presets can only be saved via physical long-press. |
+| `LOCAL_INTERNET_RADIO` JSON descriptor approach | Speaker accepts `/select` (returns 200), briefly shows the source in now-playing, but never fetches the JSON URL or the stream URL from it. The cloud was the resolver. Doesn't work post-shutdown. |
+| Audio stream proxy for LOCAL_INTERNET_RADIO | Built an HTTP proxy at `/stream/wcrb` that correctly serves 192kbps MP3 from CDN. Speaker connects to port 8080 WebSocket fine but never requested the stream — confirms LOCAL_INTERNET_RADIO is cloud-dependent. |
+| `GET /WebSocket` path for boseWatcher WebSocket | Correct path is `GET /` — libsoundtouch Python library uses `ws://<host>:<port>/`. The `/WebSocket` path caused immediate silent close. |
+| WebSocket without User-Agent/Accept headers | libwebsockets on Bose speakers silently closes TCP connection if `User-Agent` and `Accept: */*` are absent. Standard WebSocket handshake headers alone are insufficient. |
+| boseWatcher: wait for STANDBY after INVALID_SOURCE | Speaker stays in INVALID_SOURCE indefinitely after cloud failure — never transitions to STANDBY. Abandoned in favour of polling for INVALID_SOURCE transition directly. |
+| boseWatcher: POWER key before MA play | Sent `POWER` key to clear stuck state; speaker didn't actually turn off but the sequence was unnecessary once WebSocket `nowSelectionUpdated` provided instant detection before cloud attempt. |

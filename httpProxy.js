@@ -54,6 +54,40 @@ module.exports = function handleRequest(req, res, serverBase) {
     return;
   }
 
+  // GET /wcrb.json — LOCAL_INTERNET_RADIO descriptor for Bose speakers
+  if (req.url === '/wcrb.json') {
+    const serverBase = req.headers.host ? `http://${req.headers.host}` : 'http://192.168.1.124:3000';
+    console.log('[wcrb.json] fetched by', req.socket.remoteAddress);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ audio: { hasPlaylist: false, isRealtime: true, streamUrl: serverBase + '/stream/wcrb' }, imageUrl: '', name: '99.5 WCRB', streamType: 'liveRadio' }));
+    return;
+  }
+
+  // GET /stream/wcrb — proxy WCRB audio stream as plain HTTP for Bose LOCAL_INTERNET_RADIO
+  if (req.url === '/stream/wcrb') {
+    const https = require('https');
+    console.log('[stream/wcrb] connected from', req.socket.remoteAddress);
+    const upReq = https.request({
+      hostname: 'wgbh-live.streamguys1.com',
+      path: '/classical-hi',
+      method: 'GET',
+      headers: { 'User-Agent': 'SoundTouch/1.0', 'Icy-MetaData': '0' },
+    }, (uRes) => {
+      const headers = { 'Content-Type': uRes.headers['content-type'] || 'audio/mpeg' };
+      for (const [k, v] of Object.entries(uRes.headers)) {
+        if (k.startsWith('icy-') || k === 'cache-control' || k === 'pragma') headers[k] = v;
+      }
+      res.writeHead(200, headers);
+      uRes.pipe(res);
+      res.on('error', () => uRes.destroy());
+      uRes.on('error', () => { if (!res.writableEnded) res.end(); });
+      req.on('close', () => uRes.destroy());
+    });
+    upReq.on('error', (e) => { console.error('[stream/wcrb]', e.message); if (!res.headersSent) { res.writeHead(502); res.end(); } });
+    upReq.end();
+    return;
+  }
+
   if (req.url.startsWith('/wiim/')) {
     handleWiim(req, res);
     return;
@@ -73,12 +107,13 @@ module.exports = function handleRequest(req, res, serverBase) {
       const proxyReq = http.request(options, (proxyRes) => {
         let data = '';
         proxyRes.on('data', chunk => { data += chunk; });
+        proxyRes.on('error', err => { if (!res.headersSent) { res.writeHead(500); res.end('Proxy error: ' + err.message); } });
         proxyRes.on('end', () => {
-          res.writeHead(proxyRes.statusCode, { 'Content-Type': 'text/xml' });
-          res.end(data);
+          if (!res.headersSent) res.writeHead(proxyRes.statusCode, { 'Content-Type': 'text/xml' });
+          if (!res.writableEnded) res.end(data);
         });
       });
-      proxyReq.on('error', err => { res.writeHead(500); res.end('Proxy error: ' + err.message); });
+      proxyReq.on('error', err => { if (!res.headersSent) { res.writeHead(500); res.end('Proxy error: ' + err.message); } });
       if (body) proxyReq.write(body);
       proxyReq.end();
     });

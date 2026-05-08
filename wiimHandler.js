@@ -36,6 +36,35 @@ function hexDecode(s) {
   return s.replace(/&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)));
 }
 
+const artCache = new Map(); // key: "artist|track" → url or null
+
+async function lookupArt(artist, track) {
+  const key = `${artist}|${track}`;
+  if (artCache.has(key)) return artCache.get(key);
+  try {
+    const q = encodeURIComponent(`${artist} ${track}`);
+    const url = await new Promise((resolve) => {
+      const req = https.get(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=1`, (res) => {
+        let d = '';
+        res.on('data', chunk => { d += chunk; });
+        res.on('end', () => {
+          try {
+            const art = JSON.parse(d)?.results?.[0]?.artworkUrl100?.replace('100x100bb', '300x300bb') || null;
+            resolve(art);
+          } catch { resolve(null); }
+        });
+      });
+      req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+      req.on('error', () => resolve(null));
+    });
+    artCache.set(key, url);
+    return url;
+  } catch {
+    artCache.set(key, null);
+    return null;
+  }
+}
+
 function modeToSource(mode) {
   const m = parseInt(mode);
   if ([1, 47, 48, 49].includes(m)) return 'AIRPLAY';
@@ -54,6 +83,8 @@ async function getStatus(ip) {
   const source   = modeToSource(d.mode);
   const track    = hexDecode(d.Title);
   const artist   = hexDecode(d.Artist);
+  const album    = hexDecode(d.Album);
+  const art = (track && artist) ? await lookupArt(artist, track) : null;
   const playStatus = d.status === 'play'  ? 'PLAY_STATE'
                    : d.status === 'pause' ? 'PAUSE_STATE'
                    :                        'STOP_STATE';
@@ -62,7 +93,7 @@ async function getStatus(ip) {
     muted:      d.mute === '1',
     playStatus,
     nowPlaying: source ? {
-      source, track, artist, stationName: null, art: null,
+      source, track, artist, album, stationName: null, art,
       duration: Math.round(parseInt(d.totlen || '0') / 1000),
       position: Math.round(parseInt(d.curpos || '0') / 1000),
     } : null,
@@ -132,9 +163,41 @@ module.exports = async function handleWiim(req, res) {
       return;
     }
 
+    // POST /wiim/ungroup { ip } — dissolve any native WiiM multiroom group the speaker is in
+    // Must happen before adding a WiiM to an AirPlay group via MA, otherwise MA grouping acts weird.
+    if (urlPath === '/wiim/ungroup') {
+      try {
+        const status = await wiimGet(ip, 'getStatusEx');
+        const group = String(status?.group ?? '0');
+        if (group === '1') {
+          // This device is the multiroom master — dissolve the whole group
+          await wiimGet(ip, 'multiroom:Ungroup').catch(() => {});
+          console.log('[WiiM/ungroup] %s was master → Ungroup sent', ip);
+        } else if (group === '2') {
+          // This device is a slave — ungroup via master IP if available, else try on self
+          const masterIp = status.master_ip || null;
+          if (masterIp) {
+            await wiimGet(masterIp, 'multiroom:Ungroup').catch(() => {});
+            console.log('[WiiM/ungroup] %s was slave → Ungroup sent to master %s', ip, masterIp);
+          } else {
+            await wiimGet(ip, 'multiroom:Ungroup').catch(() => {});
+            console.log('[WiiM/ungroup] %s was slave (no master_ip) → Ungroup sent to self', ip);
+          }
+        } else {
+          console.log('[WiiM/ungroup] %s standalone (group=%s) — nothing to do', ip, group);
+        }
+      } catch (e) {
+        console.warn('[WiiM/ungroup] %s error (non-fatal): %s', ip, e.message);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     res.writeHead(404); res.end('Not found');
   } catch (err) {
-    console.error('[WiiM]', err.message);
+    const connErr = err.code === 'EHOSTUNREACH' || err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.message === 'timeout';
+    if (!connErr) console.error('[WiiM]', err.message);
     if (!res.headersSent) { res.writeHead(500); res.end(err.message); }
   }
 };

@@ -7,7 +7,7 @@ module.exports = function handleUpgrade(req, socket, head) {
   const target = net.createConnection({ host: ip, port: 8080 });
   target.on('connect', () => {
     const upgradeRequest = [
-      'GET /WebSocket HTTP/1.1',
+      'GET / HTTP/1.1',
       'Host: ' + ip + ':8080',
       'Upgrade: websocket',
       'Connection: Upgrade',

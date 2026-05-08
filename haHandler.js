@@ -3,6 +3,9 @@
 const http = require('http');
 const { stopQueue, clearQueue, getAllPlayers, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
 
+// Track the station URI most recently played on each queue (for stop→rejoin→restart)
+const activeStationUris = {};
+
 // Look up HA media_player entity ID from Bose speaker name via haConfig.speakerEntities
 function speakerNameToEntityId(name) {
   const cfg = getConfig();
@@ -140,7 +143,7 @@ async function handleHa(req, res) {
   // GET /ha/config — return haConfig (no token) for the UI
   if (url === '/ha/config' && req.method === 'GET') {
     const cfg = getConfig();
-    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [] };
+    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [], features: cfg.features || {} };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(safe));
     return;
@@ -166,6 +169,144 @@ async function handleHa(req, res) {
       console.error('[ha/clear] error:', e.message);
       err(res, e.message);
     }
+    return;
+  }
+
+  // GET /ha/browse-ma?uri=<encoded_uri>&name=<item_name> — browse MA library tree
+  if (url.startsWith('/ha/browse-ma') && req.method === 'GET') {
+    const params = new URL('http://x' + url).searchParams;
+    const uri  = params.get('uri')  || '';
+    const name = params.get('name') || '';
+    try {
+      const { maPost } = require('./maClient');
+
+      // Helper: map a raw MA item to our browse item shape
+      const toItem = (i) => {
+        const mt = (i.media_type || '').toLowerCase();
+        const isLeaf = mt === 'track' || mt === 'radio';
+        let itemName = i.name || '';
+        if (!itemName && i.uri) {
+          const pathPart = i.uri.replace(/^[^:]+:\/\//, '').split('/').filter(Boolean).pop() || '';
+          itemName = pathPart.charAt(0).toUpperCase() + pathPart.slice(1);
+        }
+        return {
+          name:      itemName,
+          uri:       i.uri,
+          image:     i.image || null,
+          mediaType: mt,
+          canPlay:   mt !== 'folder' && mt !== '',
+          canExpand: !isLeaf,
+        };
+      };
+
+      // Is this an album URI? (library://album/N or provider://album/...)
+      const albumMatch = uri.match(/\/album[s]?\/([^\/]+)/);
+      const isAlbumUri = !!albumMatch;
+
+      // For album URIs: use music/albums/album_tracks (proper API, works reliably)
+      if (isAlbumUri) {
+        const itemId = albumMatch[1];
+        const providerDomainForAlbum = uri.split('--')[0].split('://')[0] || 'library';
+        try {
+          const tracks = await maPost('music/albums/album_tracks', {
+            item_id: itemId,
+            provider_instance_id_or_domain: providerDomainForAlbum,
+            in_library_only: false,
+          });
+          if (Array.isArray(tracks) && tracks.length > 0) {
+            const sorted = tracks.sort((a, b) => {
+              if (a.disc_number !== b.disc_number) return (a.disc_number || 0) - (b.disc_number || 0);
+              return (a.track_number || 0) - (b.track_number || 0);
+            });
+            const trackItems = sorted.map(t => ({
+              name:      (t.disc_number > 1 ? t.disc_number + '-' : '') + (t.track_number ? t.track_number + '. ' : '') + t.name,
+              uri:       t.uri,
+              image:     t.image || null,
+              mediaType: 'track',
+              canPlay:   true,
+              canExpand: false,
+            }));
+            ok(res, { title: name, items: trackItems });
+            return;
+          }
+        } catch (e) { console.warn('[browse-ma] album_tracks failed:', e.message); }
+      }
+
+      // Try music/browse for non-album URIs
+      const browseResult = await maPost('music/browse', uri ? { path: uri } : {});
+      const browseItems = Array.isArray(browseResult)
+        ? browseResult.filter(i => i.name !== '..').map(toItem)
+        : [];
+
+      if (browseItems.length > 0) {
+        ok(res, { title: '', items: browseItems });
+        return;
+      }
+
+      // Last fallback: use get_library filtered by provider and folder type
+      const providerDomain = uri ? uri.split('--')[0].split('://')[0] : null;
+      // Infer what type to fetch from the folder path (e.g. /folder/albums → album only)
+      const folderPath = uri ? uri.replace(/^[^:]+:\/\//, '').toLowerCase() : '';
+      const wantAlbums  = !folderPath || folderPath.includes('album');
+      const wantArtists = !folderPath || folderPath.includes('artist');
+      const wantPlaylists = folderPath.includes('playlist');
+      const wantTracks  = folderPath.includes('track');
+
+      const entries = await haGet('/api/config/config_entries/entry');
+      const entry = entries.find(e => e.domain === 'music_assistant');
+      if (!entry) throw new Error('Music Assistant not found in HA');
+      const config_entry_id = entry.entry_id;
+
+      const fetchType = async (media_type) => {
+        const r = await haServicePost('/api/services/music_assistant/get_library?return_response',
+          { config_entry_id, media_type, limit: 500 });
+        return r.body?.service_response?.items || [];
+      };
+
+      const filterByProvider = (items) => {
+        if (!providerDomain || providerDomain === 'library' || providerDomain === 'builtin') return items;
+        const filtered = items.filter(i =>
+          (i.provider_mappings || []).some(m => m.provider_domain === providerDomain)
+        );
+        return filtered.length ? filtered : items;
+      };
+
+      const resultItems = [];
+      if (wantArtists && !wantAlbums && !wantPlaylists && !wantTracks) {
+        const raw = filterByProvider(await fetchType('artist'));
+        raw.forEach(i => resultItems.push({ name: i.name, uri: i.uri, image: i.image || null, mediaType: 'artist', canPlay: true, canExpand: true }));
+      } else if (wantPlaylists) {
+        const raw = filterByProvider(await fetchType('playlist'));
+        raw.forEach(i => resultItems.push({ name: i.name, uri: i.uri, image: i.image || null, mediaType: 'playlist', canPlay: true, canExpand: false }));
+      } else if (wantTracks) {
+        const raw = filterByProvider(await fetchType('track'));
+        raw.forEach(i => resultItems.push({ name: i.name, uri: i.uri, image: i.image || null, mediaType: 'track', canPlay: true, canExpand: false }));
+      } else {
+        // Albums (default) — also include artists for mixed views
+        const [rawAlbums, rawArtists] = await Promise.all([
+          wantAlbums  ? fetchType('album')  : Promise.resolve([]),
+          wantArtists ? fetchType('artist') : Promise.resolve([]),
+        ]);
+        filterByProvider(rawArtists).forEach(i => resultItems.push({ name: i.name, uri: i.uri, image: i.image || null, mediaType: 'artist', canPlay: true, canExpand: true }));
+        filterByProvider(rawAlbums).forEach(i => resultItems.push({ name: i.name, uri: i.uri, image: i.image || null, mediaType: 'album', canPlay: true, canExpand: true }));
+      }
+
+      const items = resultItems.sort((a, b) => a.name.localeCompare(b.name));
+
+      ok(res, { title: '', items });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/search-radio?q=<query> — search MA for radio stations, returns name+uri
+  if (url.startsWith('/ha/search-radio') && req.method === 'GET') {
+    const q = new URL('http://x' + url).searchParams.get('q') || '';
+    try {
+      const { maPost } = require('./maClient');
+      const result = await maPost('music/search', { search_query: q, media_types: ['radio'], limit: 10 });
+      const stations = (result?.radio || []).map(s => ({ name: s.name, uri: s.uri }));
+      ok(res, stations);
+    } catch (e) { err(res, e.message); }
     return;
   }
 
@@ -281,6 +422,7 @@ async function handleHa(req, res) {
       }
 
       const result = await playMedia(queueId, uri);
+      activeStationUris[queueId] = uri;
       console.log('[ha/play] queueId=%s uri=%s result=%j', queueId, uri, result);
       ok(res, { result });
     } catch (e) {
@@ -339,6 +481,13 @@ async function handleHa(req, res) {
         provider,
       });
     } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/station-uri?queueId=... — return the station URI last played on a queue (for restart after group join)
+  if (url.startsWith('/ha/station-uri') && req.method === 'GET') {
+    const queueId = new URL('http://x' + url).searchParams.get('queueId');
+    ok(res, { uri: activeStationUris[queueId] || null });
     return;
   }
 
@@ -508,6 +657,38 @@ async function handleHa(req, res) {
       }
 
       ok(res, result);
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/appletv-entities — list all HA entities with "apple" in id or friendly_name (debug)
+  if (url === '/ha/appletv-entities' && req.method === 'GET') {
+    try {
+      const allStates = await haGet('/api/states');
+      const matches = Array.isArray(allStates)
+        ? allStates
+            .filter(s => s.entity_id.toLowerCase().includes('apple') ||
+                         (s.attributes?.friendly_name || '').toLowerCase().includes('apple'))
+            .map(s => ({ entity_id: s.entity_id, state: s.state, friendly_name: s.attributes?.friendly_name }))
+        : [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(matches, null, 2));
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/appletv-on — wake Apple TV via HA
+  if (url === '/ha/appletv-on' && req.method === 'POST') {
+    try {
+      const cfg = getConfig();
+      const mediaEntity = cfg.tvConfig?.appleTvEntity;
+      if (!mediaEntity) { ok(res, { ok: false, error: 'no appleTvEntity configured' }); return; }
+      const remoteEntity = cfg.tvConfig?.appleTvRemoteEntity || mediaEntity.replace(/^media_player\./, 'remote.');
+      console.log('[appletv-on] media:', mediaEntity, 'remote:', remoteEntity);
+      await haServicePost('/api/services/remote/turn_on', { entity_id: remoteEntity });
+      await new Promise(r => setTimeout(r, 500));
+      await haServicePost('/api/services/remote/send_command', { entity_id: remoteEntity, command: 'home' });
+      ok(res, { ok: true, mediaEntity, remoteEntity });
     } catch (e) { err(res, e.message); }
     return;
   }

@@ -48,12 +48,12 @@ The `/ha/group-state` handler uses: "any entity that has OTHER known entities in
 ## What's Working (as of this session)
 
 - **Radiohead Radio button**: plays via MA on the target speaker's queue
-  - Command: `player_queues/play_media` with `media` (not `uri`!) and `option: 'play'`
-  - Wired to `haConfig.speakerQueues[speakerName]` for per-speaker targeting
-- **Release to TV**: stops + clears MA queue (Sunroom only) so HA doesn't auto-restart
-  - Calls `player_queues/stop` then `player_queues/clear` on both speaker queue AND AirPlay group
-  - Works — confirmed stops MA from restarting after intentional power-off
-- **Power button MA clear**: when powering off an AIRPLAY speaker, auto-calls stop+clear on MA queues
+- **MA library browser ("Music Assistant" section)**: navigable tree — Radio, Pandora, Apple Music, Filesystem, RadioBrowser providers
+- **Apple Music via MA**: browse Artists → Albums → Tracks; play at album or track level via AirPlay
+- **NAS via MA**: "Filesystem (remote share)" in MA browser redirects to working FTP NAS browser; play at folder or track level routes through MA AirPlay using filesystem URIs (`filesystem_smb--<id>://folder/...`)
+- **Add speaker to group (stop→join→restart)**: immediately stops MA, joins speaker, restarts station. Station URI fetched from in-memory map first, falls back to `/ha/queue-uri` (survives server restart). If URI is unavailable, joins without stopping (music preserved).
+- **Release to TV**: stops + clears MA queue so HA doesn't auto-restart
+- **Power button MA clear**: when powering off an AIRPLAY speaker, auto-calls stop+clear
 - **Skip/Prev via MA**: when source=AIRPLAY, next/prev routes through `/ha/next` and `/ha/prev`
 - **HA add-on deployment**: deploy.sh does tar+SSH+rebuild in ~30s
 - **haConfig.json** has all 10 Bose speaker queue IDs in `speakerQueues`
@@ -63,6 +63,7 @@ The `/ha/group-state` handler uses: "any entity that has OTHER known entities in
 ## MA API Reference (confirmed working)
 
 Base: `POST http://localhost:8095/api` with `{ command, args }` and Bearer MA token.
+API docs available at: `http://homeassistant:8095/api-docs`
 
 | Command | Args | Notes |
 |---------|------|-------|
@@ -75,44 +76,59 @@ Base: `POST http://localhost:8095/api` with `{ command, args }` and Bearer MA to
 | `player_queues/previous` | `{ queue_id }` | Previous track |
 | `player_queues/play_media` | `{ queue_id, media: uri, option: 'play' }` | Play a URI. Use `media` NOT `uri`. Option must be string not int. |
 | `players/all` | `{}` | Returns all player states including group_members |
+| `music/browse` | `{ path: uri }` or `{}` for root | Browse MA library tree. Works at depth 0 (root) and depth 1 (provider root). **Crashes at depth 2+ for filesystem and builtin providers** — use `get_library` fallback instead. |
+| `music/browse` | `{ path: 'pandora://' }` | Works for Pandora — returns radio stations |
+| `music/albums/album_tracks` | `{ item_id, provider_instance_id_or_domain, in_library_only }` | Get tracks for a specific album. `item_id` is the numeric ID from the album URI (e.g. `library://album/32` → `item_id: "32"`). `provider_instance_id_or_domain`: use `"library"` for library URIs. Returns tracks sorted by disc/track number. |
+| `music/search` | `{ search_query, media_types: [...], limit }` | Search across all providers. Returns `{ artists, albums, tracks, radio, playlists, ... }` |
+| `players/all` | `{}` | Returns all player states including group_members |
+
+**NOT available in MA REST API:** grouping/ungrouping (use HA `media_player.join`/`unjoin` instead)
+
+### MA browse URI formats (confirmed)
+
+| Provider | Root URI | Notes |
+|----------|----------|-------|
+| MA library | `builtin://` | Sub-folders: `builtin://folder/tracks`, `builtin://folder/playlists`, `builtin://folder/radios` |
+| Pandora | `pandora://` | Browse returns radio station list directly |
+| Filesystem (NAS SMB) | `filesystem_smb--<id>://` | Sub-folder browse fails via REST API (works in MA frontend via WebSocket). Use `get_library` fallback. |
+| Apple Music | `apple_music--<id>://` | Sub-folders: `…/folder/artists`, `…/folder/albums`, `…/folder/tracks`, `…/folder/playlists`. Browse fails at this depth — use `get_library` fallback. |
+| RadioBrowser | `radiobrowser://` | |
+
+**Filesystem URI for playback:** `filesystem_smb--<id>://folder/<path-relative-to-share-root>`
+FTP path `/volume1/music/Artist/Album` → MA URI `filesystem_smb--<id>://folder/music/Artist/Album`
+MA CAN play these URIs even though `music/browse` crashes on them.
+
+### HA service: music_assistant/get_library (confirmed working)
+
+`POST /api/services/music_assistant/get_library?return_response`
+```json
+{ "config_entry_id": "<entry_id>", "media_type": "album|artist|track|radio|playlist", "limit": 500 }
+```
+Returns `{ service_response: { items: [...] } }`. Items have `provider_mappings` array for filtering by provider domain.
 
 **NOT available in MA REST API:** grouping/ungrouping (use HA `media_player.join`/`unjoin` instead)
 
 ---
 
-## Future Enhancements
+## /ha/browse-ma Endpoint Logic
 
-### Pandora / HA Integration
-✅ **Done:** Radiohead Radio plays via MA → AirPlay → Bose speakers. One-tap from our app.
+`GET /ha/browse-ma?uri=<encoded_uri>&name=<item_name>`
 
-Next: expand favorites system with additional stations.
+1. **Empty URI** → `music/browse {}` → provider list (root)
+2. **Album URI** (matches `/album[s]?/`) → `music/albums/album_tracks` directly; tracks sorted by disc/track number
+3. **All other URIs** → try `music/browse { path: uri }` first; if result is not an array or empty, fall back to `get_library` filtered by provider domain and folder type (albums/artists/playlists inferred from URI path)
 
-### Apple Music
-Explore after Pandora is solid. Likely same MA-as-intermediary approach.
+Folder name derivation: MA returns empty `name` for provider sub-folders. We derive from the URI path segment (e.g. `…/folder/artists` → "Artists").
 
-### HA Playback Handoff ("Release to TV")
-✅ **Done:** Power button on AIRPLAY speakers calls MA stop+clear. HA automation approach was also built in HA as backup (`rest_command.stop_ma_sunroom_300` / `clear_ma_sunroom_300`).
+---
 
-### MA Speaker Grouping UI
-After grouping works (see NEXT SESSION above), need to surface MA group state in the UI:
-- Poll HA entity state (`/api/states/media_player.bose_*_music_assistant`) to get `group_members`
-- Merge with Bose zone data in AllSpeakersView to show grouped speakers together
-- Or: track MA group state server-side and expose via `/ha/group-state`
+## Adding a Speaker to an Active MA Group (stop→join→restart)
 
-### Server-side WebSocket Queue (Polish)
-Replace 3s `GetTransportInfo` polling for queue advancement with a WebSocket subscription to `ws://<speakerIp>:8080`. Speaker pushes `nowPlayingUpdated` events — when `playStatus` hits `STOP_STATE` with source=UPnP, advance the queue immediately. Requires implementing WebSocket client handshake in Node.js `net` module (~50 lines, no npm).
-
-### Bose-Bedroom AirPlay
-Bose-Bedroom is the only Bose speaker without native AirPlay support. A separate AirPlay device is connected to its Aux 1 input. This needs UI/integration work.
-
-### WiiM Speaker Support
-WiiM devices work for UPnP/NAS playback already. What needs work:
-- Volume, mute, now-playing: WiiM uses Linkplay HTTP API (different from Bose port 8090 XML)
-- Zones/grouping: WiiM has its own multiroom protocol, doesn't map to Bose `/setZone`
-- Right approach: per-brand adapter (Bose, WiiM) with common interface
-
-### Docker / Home Assistant Deployment
-✅ **Done:** Running as local HA add-on. deploy.sh for fast iteration.
+Flow in `joinSpeakerNow` / `doStopJoinRestart` (app2.jsx):
+1. Fetch station URI from `/ha/station-uri` (in-memory map) → fallback to `/ha/queue-uri` (live MA queue)
+2. If URI found: stop queue → join via `/ha/group-include` → wait 500ms → restart via `/ha/play`
+3. If URI null: just join without stopping (music preserved, new speaker joins mid-stream)
+4. "Wait for track end" approach was removed — Pandora doesn't report track duration via MA REST API
 
 ---
 
@@ -120,7 +136,42 @@ WiiM devices work for UPnP/NAS playback already. What needs work:
 
 - **MA `play_media`**: parameter is `media` not `uri`; `option` must be a string (`'play'`, `'replace'`) not integer
 - **MA grouping**: REST API has NO grouping commands — use HA `media_player.join`/`unjoin`
+- **MA `music/browse`**: works at provider root level but crashes ("Internal server error") on sub-folders for filesystem and builtin providers — this is a MA REST API bug (WebSocket path works). Use `get_library` as fallback.
+- **MA `media_player.browse_media` via HA service**: returns 400 — not a "return_response" service. Use `music/browse` or `get_library` instead.
+- **sourceAccount display**: MA provider instance IDs appear as `Apple Music--Gy4DcBNy` etc. Strip `--<suffix>` before displaying.
+- **Node.js keep-alive timeout**: default is 5s, causing "TypeError: Load failed" / "TypeError: Failed to fetch" in browsers. Set `server.keepAliveTimeout = 65000` and `server.headersTimeout = 66000` in main.js.
 - **Speaker IPs**: can change via DHCP; all logic uses Bose device names (from `/info` API) not IPs
-- **haConfig.json**: git-ignored, deployed separately via `scp -P 22222` or SSH heredoc (scp subsystem sometimes fails, use heredoc)
+- **haConfig.json**: git-ignored, deployed separately via SSH heredoc
 - **deploy.sh**: uses port 22222 for SSH; CRLF fix applied automatically
 - **MA token vs HA token**: these are separate auth systems; MA token won't work for HA REST API
+
+---
+
+## Future Enhancements
+
+### MA Search
+MA has a `music/search` command (`{ search_query, media_types, limit }`) that searches across all providers including Apple Music. Could add a search box to MABrowserModal to surface this.
+
+### Pandora / HA Integration
+✅ **Done:** Plays via MA → AirPlay. Browse via MABrowserModal (Pandora provider folder).
+
+### Apple Music
+✅ **Done:** Browse Artists/Albums/Tracks via MABrowserModal. Play at album or track level via AirPlay.
+
+### NAS via MA AirPlay
+✅ **Done:** MA browser "Filesystem" redirects to FTP NAS browser; playback routes through MA using filesystem URIs. Both UPnP (direct NAS button) and MA AirPlay (via MA browser) paths are available.
+
+### HA Playback Handoff ("Release to TV")
+✅ **Done:** Power button on AIRPLAY speakers calls MA stop+clear.
+
+### MA Speaker Grouping UI
+✅ **Done:** Include section shows other speakers; clicking adds to MA AirPlay group via stop→join→restart.
+
+### Server-side WebSocket Queue (Polish)
+Replace 3s `GetTransportInfo` polling for queue advancement with a WebSocket subscription to `ws://<speakerIp>:8080`. Speaker pushes `nowPlayingUpdated` events — when `playStatus` hits `STOP_STATE` with source=UPnP, advance the queue immediately. Requires implementing WebSocket client handshake in Node.js `net` module (~50 lines, no npm).
+
+### Bose-Bedroom AirPlay
+Bose-Bedroom is the only Bose speaker without native AirPlay support. A separate AirPlay device is connected to its Aux 1 input. This needs UI/integration work.
+
+### Docker / Home Assistant Deployment
+✅ **Done:** Running as local HA add-on. deploy.sh for fast iteration.
