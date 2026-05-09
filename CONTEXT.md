@@ -233,6 +233,7 @@ Run these in order. Each has a setup, action, and expected result.
 - **Setup:** Radiohead Radio playing on a single speaker
 - **Action:** Tap next track, then prev track
 - **Expected:** Track changes each time; title/art updates within a few seconds
+- **Note (workaround active):** MA's `player_queues/next` is broken for Pandora radio — it silently does nothing. "Next track" is implemented as pause→play (800ms gap) which causes Pandora to start a new song. This is detected by checking `maTrackData[name].provider === 'pandora'` on the client and sending `{ pandora: true }` to `/ha/next`. "Prev track" is not workarounded (not useful for radio). Remove the workaround in `haHandler.js` and `app2.jsx` once MA fixes native Pandora next-track support.
 
 ---
 
@@ -331,6 +332,9 @@ Run these in order. Each has a setup, action, and expected result.
 
 ### Pandora station URI
 `library://radio/2` works but needs monitoring. If MA resets Pandora auth, the URI may change. Verify by playing in MA UI and checking `/ha/queues` for the active `current_item.media_item.uri`.
+
+### Pandora next-track workaround (MA bug)
+MA's `player_queues/next` does nothing for Pandora radio stations. The app works around this by doing pause→play instead (see `haHandler.js` `/ha/next` handler and the `isPandoraNext` flag in `app2.jsx`). If a future MA update fixes this, remove the `body.pandora` branch in the server handler and the `isPandoraNext` detection on the client.
 
 ### More favorites
 Only Radiohead Radio is in `haConfig.favorites`. Easy to add more once Pandora is stable.

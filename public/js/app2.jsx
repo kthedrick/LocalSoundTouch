@@ -1899,10 +1899,13 @@ function AllSpeakersView() {
           || speakerQueue
           || haConfig?.queues?.airplayGroup;
         if (queueId) {
+          // WORKAROUND: MA next-track is broken for Pandora; signal server to use pause→play instead.
+          // Remove pandora flag once MA fixes native next-track support for Pandora radio.
+          const isPandoraNext = key === 'NEXT_TRACK' && maTrackData[name]?.provider === 'pandora';
           fetch(key === 'NEXT_TRACK' ? '/ha/next' : '/ha/prev', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ queueId }),
+            body: JSON.stringify(isPandoraNext ? { queueId, pandora: true } : { queueId }),
           });
           return;
         }

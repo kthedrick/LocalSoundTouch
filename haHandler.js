@@ -384,11 +384,20 @@ async function handleHa(req, res) {
     return;
   }
 
-  // POST /ha/next — next track { queueId }
+  // POST /ha/next — next track { queueId, pandora? }
   if (url === '/ha/next' && req.method === 'POST') {
     const body = await readBody(req);
     try {
-      await nextTrack(body.queueId);
+      if (body.pandora) {
+        // WORKAROUND: MA next-track is broken for Pandora radio — it silently does nothing.
+        // Pause→play causes Pandora to start a new song on the station, which is the best
+        // available substitute. Remove this branch when MA fixes native Pandora next-track.
+        await pauseQueue(body.queueId);
+        await new Promise(r => setTimeout(r, 800));
+        await resumeQueue(body.queueId);
+      } else {
+        await nextTrack(body.queueId);
+      }
       ok(res, {});
     } catch (e) { err(res, e.message); }
     return;
