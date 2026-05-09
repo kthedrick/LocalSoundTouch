@@ -913,7 +913,7 @@ function SoundSettingsModal({ ip, speakerName, initialVolume, onVolumeChange, on
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, stopRestartEnabled, onToggleStopRestart }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
@@ -1287,7 +1287,14 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
 
       {otherSpeakers && otherSpeakers.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-700/60">
-          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Include</h3>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider">Include</h3>
+            <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+              <input type="checkbox" checked={!!stopRestartEnabled} onChange={onToggleStopRestart}
+                className="w-3 h-3 accent-blue-500" />
+              Stop &amp; restart
+            </label>
+          </div>
           <div className="flex flex-wrap gap-2">
             {otherSpeakers.map(spk => {
               const isSelected = pendingGroups?.[group.masterIp]?.has(spk.ip);
@@ -1410,6 +1417,11 @@ function AllSpeakersView() {
   const [tvState, setTvState] = useState(null);
   const [pendingGroups, setPendingGroups] = useState({});
   const [showWholeHouse, setShowWholeHouse] = useState(false);
+  const [wiimAlerts, setWiimAlerts] = useState([]); // [{ name, oldIp, newIp }]
+  const [stopRestartByZone, setStopRestartByZone] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('stopRestartByZone') || '{}'); } catch { return {}; }
+  });
+  const wiimIpOverrides = useRef({}); // speakerName → override IP (persists across fetchSpeakers calls)
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
 
@@ -1419,8 +1431,12 @@ function AllSpeakersView() {
       if (!res.ok) return SPEAKERS;
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
-        // Discovery only finds Bose (port 8090) — always re-add non-Bose entries from constants
-        const nonBose = SPEAKERS.filter(s => s.brand && s.brand !== 'bose');
+        // Discovery only finds Bose (port 8090) — always re-add non-Bose entries from constants.
+        // Apply any session-local IP overrides (e.g. WiiM that moved to a new IP).
+        const nonBose = SPEAKERS.filter(s => s.brand && s.brand !== 'bose').map(s => {
+          const override = wiimIpOverrides.current[s.name];
+          return override ? { ...s, ip: override } : s;
+        });
         const merged = [...data, ...nonBose];
         setSpeakers(merged);
         return merged;
@@ -1429,6 +1445,18 @@ function AllSpeakersView() {
       console.warn('fetchSpeakers failed', err);
     }
     return SPEAKERS;
+  };
+
+  const applyWiimIpFix = (alert) => {
+    wiimIpOverrides.current[alert.name] = alert.newIp;
+    setSpeakers(prev => prev.map(s => s.name === alert.name ? { ...s, ip: alert.newIp } : s));
+    setSpeakerData(prev => {
+      const next = { ...prev };
+      const old = next[alert.oldIp];
+      if (old) { next[alert.newIp] = { ...old, ip: alert.newIp }; delete next[alert.oldIp]; }
+      return next;
+    });
+    setWiimAlerts(prev => prev.filter(a => a.name !== alert.name));
   };
 
   const fetchMaGroups = () => {
@@ -1458,6 +1486,24 @@ function AllSpeakersView() {
     load();
     fetch('/ha/config').then(r => r.json()).then(setHaConfig).catch(() => {});
     fetchMaGroups();
+
+    // Check for WiiMs that moved to new IPs since last deploy
+    fetch('/wiim/discover').then(r => r.json()).then(d => {
+      if (!d.scannedAt || !d.wiims) return;
+      const foundIps = new Set(d.wiims.map(w => w.ip));
+      const wiimSpeakers = SPEAKERS.filter(s => s.brand === 'wiim');
+      const unknownIps = d.wiims.map(w => w.ip).filter(ip => !wiimSpeakers.some(s => s.ip === ip));
+      const alerts = [];
+      wiimSpeakers.forEach(spk => {
+        if (!foundIps.has(spk.ip) && unknownIps.length > 0) {
+          // Prefer candidate not already claimed by another alert
+          const claimed = new Set(alerts.map(a => a.newIp));
+          const candidate = unknownIps.find(ip => !claimed.has(ip));
+          if (candidate) alerts.push({ name: spk.name, oldIp: spk.ip, newIp: candidate });
+        }
+      });
+      if (alerts.length) setWiimAlerts(alerts);
+    }).catch(() => {});
   }, []);
 
   // Fetch MA track metadata for AIRPLAY speakers (and AUX-redirect speakers) whenever speaker data updates
@@ -1884,10 +1930,14 @@ function AllSpeakersView() {
   // Stop queue, join new speaker, wait for AirPlay group to form, restart station
   const doStopJoinRestart = async (leaderIp, memberIp, leaderName, memberName, queueId, stationUri) => {
     const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    // Stop+restart is optional — controlled by haConfig.features.stopRestartOnGroupJoin.
-    // When disabled, MA's own late-joiner sync handles it. When enabled, we stop the queue,
-    // join, then replay the station URI so the new member starts from the same point.
-    const doStopRestart = haConfig?.features?.stopRestartOnGroupJoin === true;
+    // Radio URIs are live streams — stop+restart so the new speaker gets audio from "now".
+    // WiiM now uses AirPlay (can_group_with populated) and needs stop+restart to join a running
+    // AirPlay session — the stream must restart to include the new AirPlay endpoint. Use a longer
+    // delay for WiiM (AirPlay group formation takes more time than Bose-only groups).
+    const memberIsWiiM = speakerData[memberIp]?.brand === 'wiim';
+    const isRadioUri = stationUri && /^(library:\/\/radio\/|pandora:\/\/|radiobrowser:\/\/)/.test(stationUri);
+    const zoneAllowsStopRestart = stopRestartByZone[leaderIp] !== false;
+    const doStopRestart = zoneAllowsStopRestart && (isRadioUri || haConfig?.features?.stopRestartOnGroupJoin === true);
     if (doStopRestart && queueId && stationUri) {
       await post('/ha/stop', { queueId });
       await post('/ha/clear', { queueId });
@@ -1906,7 +1956,7 @@ function AllSpeakersView() {
       if (!d.ok) console.error('[doStopJoinRestart] group-include failed:', d.error);
     } catch (e) { console.warn('[doStopJoinRestart] error:', e); }
     if (doStopRestart && queueId && stationUri) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, memberIsWiiM ? 1500 : 500));
       await post('/ha/play', { queueId, uri: stationUri });
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
@@ -1951,6 +2001,14 @@ function AllSpeakersView() {
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);
     return null;
+  };
+
+  const toggleStopRestart = (masterIp) => {
+    setStopRestartByZone(prev => {
+      const next = { ...prev, [masterIp]: prev[masterIp] === false ? true : false };
+      try { localStorage.setItem('stopRestartByZone', JSON.stringify(next)); } catch {}
+      return next;
+    });
   };
 
   const togglePendingMember = (leaderIp, memberIp) => {
@@ -2085,6 +2143,24 @@ function AllSpeakersView() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {haConfig && (() => {
+              const haUrl = haConfig.haUrl || 'http://homeassistant:8123';
+              const maUrl = haUrl.replace(':8123', ':8095');
+              return (<>
+                <a href={maUrl} target="_blank" rel="noreferrer"
+                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
+                  Music Assistant
+                </a>
+                <a href={haUrl} target="_blank" rel="noreferrer"
+                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
+                  Home Assistant
+                </a>
+              </>);
+            })()}
+            <a href="/tests.html" target="_blank" rel="noreferrer"
+              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-lg text-xs transition">
+              Tests
+            </a>
             {haConfig?.features?.wholeHouseOverview && (
               <button onClick={() => setShowWholeHouse(true)}
                 title="All rooms overview"
@@ -2106,6 +2182,25 @@ function AllSpeakersView() {
 
         {/* TV card */}
         <TVCard tvState={tvState} />
+
+        {/* WiiM IP change alerts */}
+        {wiimAlerts.map(alert => (
+          <div key={alert.name} className="mx-3 mb-1 px-3 py-2 bg-amber-900/30 border border-amber-700/40 rounded-lg flex items-center justify-between gap-3">
+            <span className="text-amber-200 text-xs">
+              <span className="font-medium">{alert.name}</span> moved to {alert.newIp}
+            </span>
+            <div className="flex gap-1.5 flex-shrink-0">
+              <button onClick={() => applyWiimIpFix(alert)}
+                className="px-2 py-1 bg-amber-700 hover:bg-amber-600 text-white rounded text-xs transition">
+                Use {alert.newIp}
+              </button>
+              <button onClick={() => setWiimAlerts(prev => prev.filter(a => a.name !== alert.name))}
+                className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs transition">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ))}
 
         {/* Speaker groups */}
         <div className="space-y-3">
@@ -2131,6 +2226,8 @@ function AllSpeakersView() {
                 onEstablishBoseZone={establishBoseZone}
                 onJoinNow={joinSpeakerNow}
                 onAdoptPhantomGroup={adoptPhantomGroup}
+                stopRestartEnabled={stopRestartByZone[group.masterIp] !== false}
+                onToggleStopRestart={() => toggleStopRestart(group.masterIp)}
               />
             );
           })}

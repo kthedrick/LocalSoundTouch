@@ -1,4 +1,5 @@
-const https = require('https');
+const https         = require('https');
+const { getDiscovery } = require('./wiimDiscovery');
 
 const TIMEOUT_MS = 5000;
 
@@ -112,6 +113,12 @@ module.exports = async function handleWiim(req, res) {
   const url     = new URL(req.url, 'http://localhost');
   const urlPath = url.pathname;
   try {
+    if (urlPath === '/wiim/discover') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getDiscovery()));
+      return;
+    }
+
     if (urlPath === '/wiim/test') {
       const ip = url.searchParams.get('ip');
       if (!ip) { res.writeHead(400); res.end('ip required'); return; }

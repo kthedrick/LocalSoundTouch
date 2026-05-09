@@ -9,6 +9,7 @@ const httpProxy = require('./httpProxy');
 const wsProxy = require('./wsProxy');
 const speakerDiscovery = require('./speakerDiscovery');
 const boseWatcher      = require('./boseWatcher');
+const wiimDiscovery    = require('./wiimDiscovery');
 const { mountNas } = require('./nasMount');
 
 const PORT = 3000;
@@ -41,4 +42,5 @@ server.listen(PORT, async () => {
   await speakerDiscovery.discoverSpeakers();
   setInterval(() => speakerDiscovery.discoverSpeakers().catch(() => {}), 30000);
   boseWatcher.start(speakerDiscovery.getSpeakers());
+  wiimDiscovery.start();
 });

@@ -167,8 +167,44 @@ function watchSpeakerWs(ip, name) {
 // Catches INVALID_SOURCE when WS is disconnected or preset not in presetActions.
 // Uses its own prev tracking so WS state updates don't interfere.
 
+function confirmAndFallback(ip, name) {
+  // Re-check after a delay: if still INVALID_SOURCE, fire fallback.
+  // This prevents false triggers during the transient INVALID_SOURCE that
+  // Bose speakers emit while powering off (they settle to STANDBY within seconds).
+  const req = http.request(
+    { hostname: ip, port: 8090, path: '/now_playing', method: 'GET', timeout: 3000 },
+    (res) => {
+      let data = '';
+      res.on('data', c => { data += c; });
+      res.on('end', () => {
+        const m   = data.match(/nowPlaying[^>]+source="([^"]+)"/);
+        const cur = m ? m[1] : null;
+        if (cur !== 'INVALID_SOURCE') {
+          console.log(`[boseWatcher] ${name}: INVALID_SOURCE cleared (power-off), skipping fallback`);
+          return;
+        }
+        // invalidSourceFallback: candidate for removal — presetActions now handles
+        // WCRB directly, so this fallback has no remaining legitimate use case.
+        // Re-enable by adding "invalidSourceFallback": { "uri": "..." } to haConfig.json.
+        const cfg      = getConfig();
+        const fallback = cfg.invalidSourceFallback;
+        if (!fallback) return;
+        const uri = fallback[name]?.uri || fallback.uri;
+        if (!uri) return;
+        console.log(`[boseWatcher] ${name}: INVALID_SOURCE confirmed → ${uri}`);
+        playFallback(ip, name, uri);
+      });
+    }
+  );
+  req.on('error', () => {});
+  req.on('timeout', () => req.destroy());
+  req.end();
+}
+
 function pollSpeaker(ip, name) {
-  let prev = null;
+  let prev            = null;
+  let pendingFallback = null;
+
   setInterval(() => {
     const req = http.request(
       { hostname: ip, port: 8090, path: '/now_playing', method: 'GET', timeout: 3000 },
@@ -181,14 +217,18 @@ function pollSpeaker(ip, name) {
           if (!source) return;
           const last = prev;
           prev = source;
-          if (source === 'INVALID_SOURCE' && last !== 'INVALID_SOURCE') {
-            const cfg      = getConfig();
-            const fallback = cfg.invalidSourceFallback;
-            if (!fallback) return;
-            const uri = fallback[name]?.uri || fallback.uri;
-            if (!uri) return;
-            console.log(`[boseWatcher] ${name}: INVALID_SOURCE fallback → ${uri}`);
-            playFallback(ip, name, uri);
+
+          if (source !== 'INVALID_SOURCE') {
+            if (pendingFallback) { clearTimeout(pendingFallback); pendingFallback = null; }
+            return;
+          }
+
+          // Entered INVALID_SOURCE — wait 6s then confirm before firing fallback
+          if (last !== 'INVALID_SOURCE' && !pendingFallback) {
+            pendingFallback = setTimeout(() => {
+              pendingFallback = null;
+              confirmAndFallback(ip, name);
+            }, 6000);
           }
         });
       }

@@ -12,7 +12,7 @@ const SPEAKERS = [
   { ip: '192.168.1.7',   name: 'Bose-Patio' },
   { ip: '192.168.1.245', name: 'Bose-Bathroom' },
   { ip: '192.168.1.112', name: 'WiiM Basement', brand: 'wiim' },
-  { ip: '192.168.1.8',   name: 'WiiM Joshua',   brand: 'wiim' },
+  { ip: '192.168.1.9',   name: 'WiiM Joshua',   brand: 'wiim' },
   { ip: '192.168.1.139', name: 'WiiM Rosemary',  brand: 'wiim' },
 ];
 

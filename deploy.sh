@@ -30,8 +30,15 @@ tar -czf - \
   --exclude='./*.pdf' \
   --exclude='./nasConfig.json' \
   --exclude='./haConfig.json' \
+  --exclude='./tests.json' \
   --exclude='./node_modules' \
   . | $SSH "tar -xzf - -C $ADDON_DIR"
+
+echo "→ Syncing haConfig.json ..."
+cat haConfig.json | $SSH "cat > $ADDON_DIR/haConfig.json"
+
+echo "→ Seeding tests.json (first deploy only) ..."
+cat tests.json | $SSH "[ -f $ADDON_DIR/tests.json ] || cat > $ADDON_DIR/tests.json"
 
 echo "→ Fixing line endings ..."
 $SSH "sed -i 's/\r//' $ADDON_DIR/config.yaml $ADDON_DIR/Dockerfile $ADDON_DIR/run.sh"

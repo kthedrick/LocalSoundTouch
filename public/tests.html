@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tests &amp; Issues — LocalSoundTouch</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+      color: #e2e8f0;
+      font-family: system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      padding: 1.25rem;
+    }
+
+    .page-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 1.5rem;
+    }
+    .back-link {
+      font-size: 0.75rem; color: #94a3b8; text-decoration: none;
+      padding: 0.375rem 0.75rem; background: #1e293b;
+      border-radius: 0.5rem; border: 1px solid #334155;
+      transition: background 0.15s, color 0.15s;
+    }
+    .back-link:hover { background: #334155; color: #e2e8f0; }
+    .page-header h1 { font-size: 0.95rem; font-weight: 600; color: #cbd5e1; }
+
+    .section { margin-bottom: 2rem; }
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 0.6rem;
+    }
+    .section-header h2 {
+      font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #64748b;
+    }
+    .stats { font-size: 0.7rem; color: #64748b; }
+    .stats .pass { color: #22c55e; }
+    .stats .fail { color: #ef4444; }
+
+    .add-btn {
+      font-size: 0.72rem; padding: 0.3rem 0.65rem; background: #1d4ed8;
+      color: #fff; border: none; border-radius: 0.4rem; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .add-btn:hover { background: #2563eb; }
+
+    .add-form {
+      background: #1e293b; border: 1px solid #334155; border-radius: 0.65rem;
+      padding: 0.75rem; margin-bottom: 0.6rem; display: none;
+    }
+    .add-form.visible { display: block; }
+    .add-form textarea {
+      width: 100%; background: #0f172a; color: #e2e8f0;
+      border: 1px solid #334155; border-radius: 0.4rem;
+      padding: 0.45rem 0.6rem; font-size: 0.78rem; font-family: inherit;
+      resize: vertical; min-height: 3rem; outline: none;
+    }
+    .add-form textarea:focus { border-color: #3b82f6; }
+    .add-form textarea::placeholder { color: #475569; }
+    .form-actions { display: flex; gap: 0.5rem; margin-top: 0.45rem; }
+    .btn-save {
+      font-size: 0.72rem; padding: 0.3rem 0.7rem; background: #1d4ed8;
+      color: #fff; border: none; border-radius: 0.35rem; cursor: pointer;
+    }
+    .btn-save:hover { background: #2563eb; }
+    .btn-cancel {
+      font-size: 0.72rem; padding: 0.3rem 0.7rem; background: #334155;
+      color: #94a3b8; border: none; border-radius: 0.35rem; cursor: pointer;
+    }
+    .btn-cancel:hover { background: #475569; color: #e2e8f0; }
+
+    .list { display: flex; flex-direction: column; gap: 0.45rem; }
+
+    /* Test item */
+    .test-item {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 0.65rem; padding: 0.65rem 0.8rem;
+      display: flex; align-items: flex-start; gap: 0.75rem;
+    }
+    .test-item.pass { border-color: #166534; background: #14201a; opacity: 0.6; }
+    .test-item.fail { border-color: #7f1d1d; background: #201414; }
+
+    /* Item number */
+    .item-num {
+      flex-shrink: 0;
+      font-size: 0.7rem;
+      color: #64748b;
+      font-variant-numeric: tabular-nums;
+      min-width: 1.6rem;
+      text-align: right;
+      margin-top: 0.1rem;
+      user-select: none;
+    }
+
+    /* Radio group */
+    .radio-group {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      margin-top: 0.05rem;
+    }
+    .radio-group label {
+      display: flex; align-items: center; gap: 0.3rem;
+      font-size: 0.68rem; color: #64748b; cursor: pointer;
+      white-space: nowrap;
+    }
+    .radio-group input[type=radio] { accent-color: #94a3b8; margin: 0; }
+    .radio-group label.opt-pass { color: #4ade80; }
+    .radio-group label.opt-pass input { accent-color: #22c55e; }
+    .radio-group label.opt-fail { color: #f87171; }
+    .radio-group label.opt-fail input { accent-color: #ef4444; }
+
+    .item-body { flex: 1; min-width: 0; }
+    .item-desc { font-size: 0.78rem; color: #cbd5e1; line-height: 1.45; }
+    .test-item.pass .item-desc { text-decoration: line-through; color: #475569; }
+    .item-meta { font-size: 0.67rem; color: #475569; margin-top: 0.28rem; }
+    .tag-pass { color: #22c55e; }
+    .tag-fail { color: #ef4444; }
+
+    /* Fail note input */
+    .fail-note {
+      display: none;
+      width: 100%;
+      margin-top: 0.4rem;
+      background: #0f172a;
+      color: #fca5a5;
+      border: 1px solid #7f1d1d;
+      border-radius: 0.35rem;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.75rem;
+      font-family: inherit;
+      outline: none;
+    }
+    .test-item.fail .fail-note { display: block; }
+    .fail-note:focus { border-color: #ef4444; }
+    .fail-note::placeholder { color: #6b2727; }
+
+    /* Snapshot summary shown on fail items */
+    .snapshot-summary {
+      display: none;
+      margin-top: 0.4rem;
+      font-size: 0.67rem;
+      color: #64748b;
+      line-height: 1.5;
+    }
+    .test-item.fail .snapshot-summary { display: block; }
+    .snapshot-summary .spk-row { display: flex; gap: 0.4rem; }
+    .snapshot-summary .spk-name { color: #475569; min-width: 7rem; flex-shrink: 0; }
+    .snapshot-summary .spk-playing { color: #94a3b8; }
+    .snapshot-summary .spk-idle { color: #334155; }
+
+    .btn-del {
+      flex-shrink: 0; background: none; border: none; color: #334155;
+      cursor: pointer; font-size: 0.75rem; padding: 0.1rem 0.2rem;
+      border-radius: 0.25rem; transition: color 0.15s;
+    }
+    .btn-del:hover { color: #ef4444; }
+
+    /* Issue item */
+    .issue-item {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 0.65rem; padding: 0.65rem 0.8rem;
+      display: flex; align-items: flex-start; gap: 0.65rem;
+    }
+    .issue-dot {
+      flex-shrink: 0; width: 0.45rem; height: 0.45rem;
+      border-radius: 50%; background: #f59e0b; margin-top: 0.38rem;
+    }
+    .issue-text { font-size: 0.78rem; color: #cbd5e1; line-height: 1.45; flex: 1; }
+    .issue-meta { font-size: 0.67rem; color: #475569; margin-top: 0.25rem; }
+
+    .empty { text-align: center; color: #475569; font-size: 0.78rem; padding: 1.25rem 0; }
+    .divider { border: none; border-top: 1px solid #1e293b; margin: 1.5rem 0; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <a href="/" class="back-link">← App</a>
+  <h1>Tests &amp; Issues</h1>
+  <div style="width:4rem"></div>
+</div>
+
+<!-- ── TEST CASES ───────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <h2>Test Cases</h2>
+    <span class="stats" id="testStats"></span>
+    <button class="add-btn" id="addTestBtn">+ Add</button>
+  </div>
+  <div class="add-form" id="addTestForm">
+    <textarea id="testDesc" placeholder="Describe what to test and how to confirm it works..." rows="3"></textarea>
+    <div class="form-actions">
+      <button class="btn-save" id="saveTestBtn">Add</button>
+      <button class="btn-cancel" id="cancelTestBtn">Cancel</button>
+    </div>
+  </div>
+  <div class="list" id="testList"></div>
+</div>
+
+<hr class="divider">
+
+<!-- ── ISSUES ──────────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <h2>Observed Issues</h2>
+    <span></span>
+    <button class="add-btn" id="addIssueBtn" style="background:#92400e">+ Log Issue</button>
+  </div>
+  <div class="add-form" id="addIssueForm">
+    <textarea id="issueText" placeholder="Describe what went wrong, when it happened, and what you were doing..." rows="3"></textarea>
+    <div class="form-actions">
+      <button class="btn-save" id="saveIssueBtn" style="background:#b45309">Log</button>
+      <button class="btn-cancel" id="cancelIssueBtn">Cancel</button>
+    </div>
+  </div>
+  <div class="list" id="issueList"></div>
+</div>
+
+<script>
+  let tests  = [];
+  let issues = [];
+
+  async function load() {
+    const r = await fetch('/tests');
+    const d = await r.json();
+    tests  = d.tests  || [];
+    issues = d.issues || [];
+    render();
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+           d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function render() { renderTests(); renderIssues(); }
+
+  function renderSnapshot(snap) {
+    if (!snap || !snap.length) return '<div class="snapshot-summary"><span class="spk-idle">No snapshot captured</span></div>';
+    const rows = snap.map(s => {
+      if (s.error) return `<div class="spk-row"><span class="spk-name">${esc(s.name||'?')}</span><span class="spk-idle">unreachable</span></div>`;
+      const isPlaying = s.playStatus === 'PLAY_STATE';
+      const detail = [s.source, s.station || s.track, s.artist].filter(Boolean).join(' · ');
+      return `<div class="spk-row">
+        <span class="spk-name">${esc(s.name)}</span>
+        <span class="${isPlaying ? 'spk-playing' : 'spk-idle'}">${esc(detail) || (isPlaying ? 'playing' : 'idle')}</span>
+      </div>`;
+    }).join('');
+    return `<div class="snapshot-summary">${rows}</div>`;
+  }
+
+  function renderTests() {
+    const passed = tests.filter(t => t.result === 'pass').length;
+    const failed = tests.filter(t => t.result === 'fail').length;
+    const total  = tests.length;
+    const statsEl = document.getElementById('testStats');
+    if (total === 0) { statsEl.innerHTML = ''; }
+    else {
+      statsEl.innerHTML =
+        `<span class="pass">${passed} pass</span> · <span class="fail">${failed} fail</span> · ${total - passed - failed} pending`;
+    }
+
+    const el = document.getElementById('testList');
+    if (total === 0) { el.innerHTML = '<div class="empty">No test cases yet.</div>'; return; }
+
+    el.innerHTML = tests.map((t, idx) => {
+      const r   = t.result || 'none';
+      const num = tests.length - idx;
+      const metaPart = r !== 'none'
+        ? ` &nbsp;·&nbsp; <span class="${r === 'pass' ? 'tag-pass' : 'tag-fail'}">${r === 'pass' ? '✓ passed' : '✗ failed'} ${fmtDate(t.resultAt)}</span>`
+        : '';
+      return `
+        <div class="test-item ${r}" data-id="${t.id}">
+          <div class="item-num">#${num}</div>
+          <div class="radio-group">
+            <label class="opt-none"><input type="radio" name="r_${t.id}" value="none" ${r==='none'?'checked':''}> —</label>
+            <label class="opt-pass"><input type="radio" name="r_${t.id}" value="pass" ${r==='pass'?'checked':''}> Pass</label>
+            <label class="opt-fail"><input type="radio" name="r_${t.id}" value="fail" ${r==='fail'?'checked':''}> Fail</label>
+          </div>
+          <div class="item-body">
+            <div class="item-desc">${esc(t.description)}</div>
+            <input class="fail-note" type="text" data-id="${t.id}"
+              placeholder="What went wrong? (saves on Enter or blur)"
+              value="${esc(t.note || '')}">
+            ${renderSnapshot(t.failSnapshot)}
+            <div class="item-meta">Added ${fmtDate(t.addedAt)}${metaPart}</div>
+          </div>
+          <button class="btn-del" data-id="${t.id}" title="Delete">✕</button>
+        </div>`;
+    }).join('');
+
+    el.querySelectorAll('.radio-group input[type=radio]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const item = radio.closest('.test-item');
+        const id   = item.dataset.id;
+        if (radio.value === 'fail') item.querySelector('.fail-note')?.focus();
+        setResult(id, radio.value);
+      });
+    });
+    el.querySelectorAll('.fail-note').forEach(input => {
+      const save = () => saveNote(input.dataset.id, input.value);
+      input.addEventListener('blur', save);
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save(); input.blur(); } });
+    });
+    el.querySelectorAll('.btn-del').forEach(btn =>
+      btn.addEventListener('click', () => delTest(btn.dataset.id)));
+  }
+
+  function renderIssues() {
+    const el = document.getElementById('issueList');
+    if (issues.length === 0) { el.innerHTML = '<div class="empty">No issues logged.</div>'; return; }
+    el.innerHTML = issues.map(i => `
+      <div class="issue-item" data-id="${i.id}">
+        <div class="issue-dot"></div>
+        <div class="item-body">
+          <div class="issue-text">${esc(i.text)}</div>
+          <div class="issue-meta">Logged ${fmtDate(i.loggedAt)}</div>
+        </div>
+        <button class="btn-del" data-id="${i.id}" title="Delete">✕</button>
+      </div>`).join('');
+    el.querySelectorAll('.btn-del').forEach(btn =>
+      btn.addEventListener('click', () => delIssue(btn.dataset.id)));
+  }
+
+  async function saveNote(id, note) {
+    await fetch('/tests/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    });
+    const t = tests.find(t => t.id === id);
+    if (t) t.note = note.trim();
+  }
+
+  async function setResult(id, result) {
+    let failSnapshot = undefined;
+    if (result === 'fail') {
+      try {
+        const r = await fetch('/snapshot');
+        failSnapshot = await r.json();
+      } catch { failSnapshot = null; }
+    }
+    await fetch('/tests/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ result, ...(failSnapshot !== undefined && { failSnapshot }) }),
+    });
+    const t = tests.find(t => t.id === id);
+    if (t) {
+      t.result = result;
+      t.resultAt = result !== 'none' ? new Date().toISOString() : null;
+      if (result === 'fail') t.failSnapshot = failSnapshot;
+      else t.failSnapshot = null;
+    }
+    renderTests();
+  }
+
+  async function delTest(id) {
+    if (!confirm('Delete this test case?')) return;
+    await fetch('/tests/' + id, { method: 'DELETE' });
+    tests = tests.filter(t => t.id !== id);
+    renderTests();
+  }
+
+  async function delIssue(id) {
+    if (!confirm('Delete this issue?')) return;
+    await fetch('/issues/' + id, { method: 'DELETE' });
+    issues = issues.filter(i => i.id !== id);
+    renderIssues();
+  }
+
+  function setupForm(addBtnId, formId, inputId, saveBtnId, cancelBtnId, onSave) {
+    const form  = document.getElementById(formId);
+    const input = document.getElementById(inputId);
+    document.getElementById(addBtnId).addEventListener('click', () => {
+      form.classList.toggle('visible');
+      if (form.classList.contains('visible')) input.focus();
+    });
+    document.getElementById(cancelBtnId).addEventListener('click', () => {
+      form.classList.remove('visible'); input.value = '';
+    });
+    document.getElementById(saveBtnId).addEventListener('click', async () => {
+      const val = input.value.trim();
+      if (!val) return;
+      await onSave(val);
+      input.value = '';
+      form.classList.remove('visible');
+    });
+  }
+
+  setupForm('addTestBtn','addTestForm','testDesc','saveTestBtn','cancelTestBtn', async desc => {
+    await fetch('/tests', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({description:desc}) });
+    await load();
+  });
+
+  setupForm('addIssueBtn','addIssueForm','issueText','saveIssueBtn','cancelIssueBtn', async text => {
+    await fetch('/issues', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text}) });
+    await load();
+  });
+
+  load();
+</script>
+</body>
+</html>

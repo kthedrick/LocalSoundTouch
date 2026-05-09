@@ -524,11 +524,44 @@ async function handleHa(req, res) {
       return;
     }
     try {
+      // Build the complete current group via union-find across all entity states.
+      // Fetching only the leader's state misses members the leader hasn't yet reflected
+      // (HA/MA state sync is inconsistent — some entities update faster than others).
+      let existingMembers = [];
+      try {
+        const allStates  = await haGet('/api/states');
+        const entityIds  = new Set(Object.values(getConfig().speakerEntities || {}));
+        const membersMap = {};
+        if (Array.isArray(allStates)) {
+          for (const s of allStates) {
+            if (entityIds.has(s.entity_id))
+              membersMap[s.entity_id] = s.attributes?.group_members || [];
+          }
+        }
+        // Walk outward from the leader to collect all transitively grouped entities
+        const groupSet = new Set([masterEntity]);
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const [eid, members] of Object.entries(membersMap)) {
+            if (!groupSet.has(eid)) continue;
+            for (const m of members) {
+              if (entityIds.has(m) && !groupSet.has(m)) { groupSet.add(m); changed = true; }
+            }
+          }
+        }
+        existingMembers = [...groupSet].filter(e => e !== masterEntity);
+      } catch (e) {
+        console.warn('[ha/group-include] could not fetch existing members:', e.message);
+      }
+      const allMembers = [...new Set([...existingMembers, ...targetEntities])];
+      console.log('[ha/group-include] existing=%s new=%s', existingMembers.join(','), targetEntities.join(','));
+
       const result = await haServicePost('/api/services/media_player/join', {
         entity_id: masterEntity,
-        group_members: targetEntities,
+        group_members: allMembers,
       });
-      console.log('[ha/group-include] %s + [%s] → status=%d', masterEntity, targetEntities.join(', '), result.status);
+      console.log('[ha/group-include] %s + [%s] → status=%d', masterEntity, allMembers.join(', '), result.status);
       ok(res, { status: result.status });
     } catch (e) {
       console.error('[ha/group-include] error:', e.message);
@@ -606,7 +639,19 @@ async function handleHa(req, res) {
         seenKeys.add(key);
         groups.push({ leader: leaderName, members: memberNames });
       }
-      ok(res, { groups });
+
+      // Drop any group whose full speaker set is a strict subset of another group's set.
+      // This happens when one entity has stale group_members (e.g. missing a late joiner)
+      // while other entities in the same group have an up-to-date view.
+      const fullSets = groups.map(g => new Set([g.leader, ...g.members]));
+      const filtered = groups.filter((_, i) =>
+        !fullSets.some((other, j) =>
+          j !== i && fullSets[i].size < other.size &&
+          [...fullSets[i]].every(m => other.has(m))
+        )
+      );
+
+      ok(res, { groups: filtered });
     } catch (e) { err(res, e.message); }
     return;
   }

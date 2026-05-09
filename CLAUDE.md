@@ -6,7 +6,36 @@ See CONTEXT.md for full architecture, technical decisions, and speaker/NAS detai
 
 ## MA Speaker Grouping — Status & Entity ID Reference
 
-**Status:** Fully working. MA grouping uses HA `media_player.join`/`unjoin` via HA REST API (port 8123). `/ha/group-state` polls HA entity states to detect active groups and merge them into the UI zone cards.
+**Status (Bose):** Fully working. MA grouping uses HA `media_player.join`/`unjoin` via HA REST API (port 8123). `/ha/group-state` polls HA entity states to detect active groups and merge them into the UI zone cards.
+
+**Status (WiiM joining an existing Bose AirPlay group): UNSOLVED — active investigation.**
+
+### WiiM Grouping — Key Findings (do not re-investigate without reading this)
+
+MA uses two distinct mechanisms for multi-speaker playback:
+1. **Group** (`can_group_with`): native AirPlay multi-room — Bose speakers use this
+2. **Sync** (`synced_to`): one player follows another player's queue output — WiiM Basement uses this
+
+WiiM Basement (`up00226c2e2da2`) has `can_group_with: []` in MA's player state, meaning it **cannot lead or join an AirPlay group**. But it CAN be synced (`synced_to`). When you add WiiM via the MA UI, MA sets `synced_to` on WiiM — it does NOT use AirPlay grouping.
+
+HA `media_player.join` maps to MA's **group** mechanism, not sync. So calling `media_player.join(sunroom, [wiim_basement])` updates HA entity state (returns 200, wiim_basement appears in group_members) but MA does not actually sync WiiM's audio output. The WiiM remains silent.
+
+**What we need:** A way to tell MA to set `synced_to` on WiiM Basement programmatically. Options still to try:
+- MA REST API: `players/player_sync` — tried, returns "Invalid Command"
+- MA WebSocket API: the MA Python client has `client.players.player_sync(player_id, target_player_id)` — this is the likely correct path, but requires a WebSocket implementation
+- HA `music_assistant.transfer_queue` service — not yet tried with the right params
+- Find the correct REST command by inspecting MA WebSocket traffic when adding via MA UI
+
+**WiiM Basement MA player state when synced via MA UI:**
+```json
+"synced_to": "up304511da849b",   ← Living Room queue ID
+"active_source": "up304511da849b",
+"active_group": null,
+"can_group_with": [],
+"group_members": []
+```
+
+**haConfig.json note:** haConfig.json is excluded from the deploy tarball but deploy.sh now syncs it explicitly via SSH. Changes to speakerEntities WILL reach the Pi on next deploy.
 
 ### HA Entity ID Quirks (read this before touching haConfig.json)
 
@@ -25,7 +54,7 @@ Entity IDs are NOT auto-derivable — MA assigns a numeric suffix and the number
 | Bose-Rosemary | `media_player.bose_rosemary_6` | |
 | Bose-Bedroom | `media_player.bose_bathroom2` | **This is the Belkin AirPlay adapter, NOT the Bose-Bedroom speaker.** Bose-Bedroom has no native AirPlay so cannot join AirPlay sync groups. The Belkin (on AUX1) is used for MA grouping. It was auto-named `bose_bathroom2` by HA before renaming — the name is misleading. |
 | WiiM Basement | `media_player.wiim_basement` | Verified working for MA grouping |
-| WiiM Joshua | `media_player.audiopro_a10_wiim_124c` | **AudioPro A10 speaker with WiiM inside.** The `media_player.wiim_joshua` entity exists but is NOT the right one for MA AirPlay grouping — use the AudioPro entity. |
+| WiiM Joshua | `media_player.wiim_joshua` | **AudioPro A10 speaker with WiiM inside.** After May 2026 re-pair, the correct entity is `wiim_joshua` (not the `audiopro_a10_wiim_124c_2` MA entity, which shows "off" even when playing). Queue ID unchanged: `up9cb8b438124c`. |
 | WiiM Rosemary | `media_player.wiim_rosemary` | Assumed (same pattern as Basement); verify if grouping fails |
 
 ### HA group_members behavior (important for /ha/group-state logic)

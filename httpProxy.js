@@ -6,7 +6,9 @@ const handleNas = require('./nasHandler');
 const upnpModule = require('./upnpHandler');
 const handleUpnp = upnpModule.handle;
 const handleHa   = require('./haHandler');
-const handleWiim = require('./wiimHandler');
+const handleWiim  = require('./wiimHandler');
+const handleTests    = require('./testsHandler');
+const handleSnapshot = require('./snapshotHandler');
 
 const publicDir = path.join(__dirname, 'public');
 
@@ -21,7 +23,7 @@ let _baseSet = false;
 module.exports = function handleRequest(req, res, serverBase) {
   if (!_baseSet && serverBase) { upnpModule.setServerBase(serverBase); _baseSet = true; }
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
@@ -90,6 +92,17 @@ module.exports = function handleRequest(req, res, serverBase) {
 
   if (req.url.startsWith('/wiim/')) {
     handleWiim(req, res);
+    return;
+  }
+
+  if (req.url === '/tests' || req.url.startsWith('/tests/') ||
+      req.url === '/issues' || req.url.startsWith('/issues/')) {
+    handleTests(req, res);
+    return;
+  }
+
+  if (req.url === '/snapshot') {
+    handleSnapshot(req, res);
     return;
   }
 
