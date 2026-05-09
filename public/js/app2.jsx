@@ -939,8 +939,19 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   const [soundSettingsSpk, setSoundSettingsSpk] = useState(null);
   const [upnpRepeatLocal, setUpnpRepeatLocal] = useState(master?.upnpRepeat || 'REPEAT_OFF');
   const [tvResetBusy, setTvResetBusy] = useState(false);
+  const [showAllSpeakers, setShowAllSpeakers] = useState(false);
   const timerRef = useRef(null);
   const adoptedRef = useRef(false);
+  const pairingFreqRef = useRef(null);
+  if (pairingFreqRef.current === null) {
+    try { pairingFreqRef.current = JSON.parse(localStorage.getItem('pairingFreq') || '{}'); } catch { pairingFreqRef.current = {}; }
+  }
+  const recordPairing = (leaderName, memberName) => {
+    const f = pairingFreqRef.current;
+    if (!f[leaderName]) f[leaderName] = {};
+    f[leaderName][memberName] = (f[leaderName][memberName] || 0) + 1;
+    try { localStorage.setItem('pairingFreq', JSON.stringify(f)); } catch {}
+  };
   const maybeAdopt = async () => {
     if (!group.phantomGroup || adoptedRef.current) return;
     adoptedRef.current = true;
@@ -1115,99 +1126,131 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
       )}
 
       {/* ── Speakers ── */}
-      <div className="divide-y divide-slate-700/60">
-        {group.speakers.map(spk => (
-          <div key={spk.ip} className="px-4 py-3 sm:py-2.5">
-            {/* Speaker header — always full width */}
-            <div className="flex items-center gap-2 mb-2 sm:mb-0">
-              <div className="text-slate-500 flex-shrink-0"><SpeakerIcon size={15}/></div>
-              <div className="flex-1 min-w-0">
-                <span className="text-white text-base font-semibold block">{spk.name}</span>
-                <span className="text-slate-500 text-[11px] block">{spk.ip}</span>
-              </div>
-              {spk.reachable && spk.name === 'Bose-Sunroom 300' && (
-                <>
-                  <button onClick={() => resetTvAudio(spk.ip)}
-                    disabled={tvResetBusy}
-                    title="Reset TV audio (power cycle + restore TV source)"
-                    className={'p-1.5 rounded-lg transition flex-shrink-0 ' +
-                      (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-700')}>
-                    {tvResetBusy ? '…' : '↺'}
-                  </button>
-                  <button onClick={() => setSoundSettingsSpk(spk)}
-                    title="Sound settings"
-                    className="p-1.5 rounded-lg transition flex-shrink-0 text-slate-500 hover:text-white hover:bg-slate-700">
-                    ⚙
-                  </button>
-                </>
-              )}
-              {spk.reachable && (
-                <button onClick={() => onKey(spk.ip, 'POWER')}
-                  title={spk.nowPlaying?.source === 'STANDBY' ? 'Power on' : 'Power off'}
-                  className={'p-1.5 rounded-lg transition flex-shrink-0 ' +
-                    (spk.nowPlaying?.source === 'STANDBY'
-                      ? 'text-slate-600 hover:text-green-400 hover:bg-slate-700'
-                      : 'text-slate-400 hover:text-red-400 hover:bg-slate-700')}>
-                  <PowerIcon size={15}/>
-                </button>
-              )}
-            </div>
+      <div className="border-t border-slate-700/60">
+        <div className="px-4 pt-2.5 pb-1">
+          <span className="text-slate-400 text-[11px] font-semibold uppercase tracking-wider">Speakers</span>
+        </div>
 
-            {/* Volume controls + remove button */}
-            <div className="flex items-center gap-2 sm:gap-1 sm:ml-6">
+        {/* Checked speakers — in this group */}
+        {group.speakers.map(spk => (
+          <div key={spk.ip} className="px-4 py-2 flex items-start gap-2.5">
+            <input type="checkbox" checked
+              onChange={() => {
+                if (group.speakers.length <= 1 || group.phantomGroup) return;
+                if (spk.brand === 'wiim' || group.maMembers?.includes(spk.name)) {
+                  onMaGroupRemove(spk.name);
+                } else {
+                  onRemoveFromGroup(group.masterIp, spk.ip);
+                }
+              }}
+              disabled={group.speakers.length <= 1 || group.phantomGroup}
+              className="w-4 h-4 mt-0.5 accent-blue-500 flex-shrink-0 cursor-pointer disabled:opacity-30"
+            />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-white text-sm font-semibold truncate">{spk.name}</span>
+                {spk.reachable && spk.name === 'Bose-Sunroom 300' && (
+                  <>
+                    <button onClick={() => resetTvAudio(spk.ip)} disabled={tvResetBusy} title="Reset TV audio"
+                      className={'p-1 rounded transition ' + (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-700')}>
+                      {tvResetBusy ? '…' : '↺'}
+                    </button>
+                    <button onClick={() => setSoundSettingsSpk(spk)} title="Sound settings"
+                      className="p-1 rounded transition text-slate-500 hover:text-white hover:bg-slate-700">⚙</button>
+                  </>
+                )}
+                {spk.reachable && (
+                  <button onClick={() => onKey(spk.ip, 'POWER')}
+                    title={spk.nowPlaying?.source === 'STANDBY' ? 'Power on' : 'Power off'}
+                    className={'p-1 rounded transition ' +
+                      (spk.nowPlaying?.source === 'STANDBY'
+                        ? 'text-slate-600 hover:text-green-400 hover:bg-slate-700'
+                        : 'text-slate-400 hover:text-red-400 hover:bg-slate-700')}>
+                    <PowerIcon size={13}/>
+                  </button>
+                )}
+              </div>
               {!spk.reachable ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-600 text-xs">Unreachable</span>
-                  {spk.failedCall && (
-                    <span className="text-rose-400 text-xs">({spk.failedCall})</span>
-                  )}
-                </div>
+                <span className="text-slate-600 text-xs">Unreachable{spk.failedCall ? ' (' + spk.failedCall + ')' : ''}</span>
               ) : (
-                <>
+                <div className="flex items-center gap-1.5 mt-1">
                   <button onClick={() => onMute(spk.ip)}
-                    className="p-2 sm:px-2 sm:py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-xs flex-shrink-0">
-                    {spk.muted ? <VolumeIcon size={14}/> : <MuteIcon size={14}/>}
+                    className="p-1 bg-slate-700 hover:bg-slate-600 text-white rounded flex-shrink-0">
+                    {spk.muted ? <VolumeIcon size={12}/> : <MuteIcon size={12}/>}
                   </button>
                   <button onClick={() => onVolumeChange(spk.ip, Math.max(0, spk.volume - 1), true)}
-                    className="px-2.5 py-2 sm:px-2 sm:py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-xs font-mono flex-shrink-0">−</button>
+                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-mono flex-shrink-0">−</button>
                   <input type="range" min="0" max="100" value={spk.volume}
                     onChange={e => onVolumeChange(spk.ip, parseInt(e.target.value))}
-                    className="flex-1 sm:w-40 h-2 sm:h-1.5 rounded-full appearance-none cursor-pointer"
-                    style={{
-                      background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 ' +
-                        spk.volume + '%, #334155 ' + spk.volume + '%, #334155 100%)'
-                    }}
+                    className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer"
+                    style={{ background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 ' + spk.volume + '%, #334155 ' + spk.volume + '%, #334155 100%)' }}
                   />
                   <button onClick={() => onVolumeChange(spk.ip, Math.min(100, spk.volume + 1), true)}
-                    className="px-2.5 py-2 sm:px-2 sm:py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-xs font-mono flex-shrink-0">+</button>
-                  <span className="text-slate-400 text-xs tabular-nums w-8 text-right flex-shrink-0">{spk.volume}</span>
-
-                  {/* Status badges */}
-                  {spk.failedCall && (
-                    <span className="text-rose-400 text-[10px] uppercase tracking-[0.08em]">Failed: {spk.failedCall}</span>
-                  )}
-                  {isStandby && (
-                    <span className="text-slate-600 text-xs">Standby</span>
-                  )}
-
-                  {/* Remove button */}
-                  {group.speakers.length > 1 && !group.phantomGroup && (
-                    <button onClick={() => {
-                      if (spk.brand === 'wiim' || group.maMembers?.includes(spk.name)) {
-                        onMaGroupRemove(spk.name);
-                      } else {
-                        onRemoveFromGroup(group.masterIp, spk.ip);
-                      }
-                    }}
-                      className="p-2 bg-slate-600 hover:bg-red-600 text-white rounded transition flex-shrink-0 flex items-center justify-center w-8 h-8">
-                      <span className="text-xl leading-none">×</span>
-                    </button>
-                  )}
-                </>
+                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-mono flex-shrink-0">+</button>
+                  <span className="text-slate-400 text-xs tabular-nums w-7 text-right flex-shrink-0">{spk.volume}</span>
+                  {spk.failedCall && <span className="text-rose-400 text-[10px]">!</span>}
+                </div>
               )}
             </div>
           </div>
         ))}
+
+        {/* Unchecked speakers — not in this group, sorted by pairing frequency with this leader */}
+        {otherSpeakers?.length > 0 && (() => {
+          const leaderFreq = pairingFreqRef.current[master?.name] || {};
+          const sorted = [...otherSpeakers].sort((a, b) => (leaderFreq[b.name] || 0) - (leaderFreq[a.name] || 0));
+          const visible = showAllSpeakers ? sorted : sorted.slice(0, 3);
+          const hiddenCount = sorted.length - 3;
+          return (
+            <div className="mt-1 mb-1">
+              <div className="mx-4 border-t border-slate-700/40 mb-1"/>
+              {visible.map(spk => {
+                const data = speakerData[spk.ip];
+                const isSelected = pendingGroups?.[group.masterIp]?.has(spk.ip);
+                const inAnotherGroup = groups.some(g => g.id !== group.id && g.speakers.length > 1 && g.speakers.some(s => s.ip === spk.ip));
+                const src = data?.nowPlaying?.source;
+                const isActive = data?.playStatus === 'PLAY_STATE';
+                const srcLabel = !data?.reachable ? 'unreachable'
+                  : inAnotherGroup ? 'grouped'
+                  : !src || src === 'STANDBY' || src === 'INVALID_SOURCE' ? ''
+                  : src === 'AIRPLAY' ? 'AirPlay'
+                  : src === 'PRODUCT' ? 'In Use · TV' : src;
+                return (
+                  <div key={spk.ip} className="px-4 py-1.5 flex items-center gap-2.5">
+                    <input type="checkbox" checked={isSelected || false}
+                      onChange={async () => {
+                        const willAdd = !isSelected;
+                        onTogglePendingMember(group.masterIp, spk.ip);
+                        if (willAdd && !isStandby) {
+                          recordPairing(master?.name, spk.name);
+                          const err = await onJoinNow(group.masterIp, spk.ip);
+                          if (err) setFavStatus('Join failed: ' + err);
+                        }
+                      }}
+                      className="w-4 h-4 accent-blue-500 flex-shrink-0 cursor-pointer"
+                    />
+                    <span className={'text-sm truncate flex-1 ' + (inAnotherGroup ? 'text-slate-500' : 'text-slate-300')}>{spk.name}</span>
+                    {srcLabel && (
+                      <span className={'text-xs flex-shrink-0 ' + (isActive ? 'text-green-400' : 'text-slate-600')}>{srcLabel}</span>
+                    )}
+                  </div>
+                );
+              })}
+              {!showAllSpeakers && hiddenCount > 0 && (
+                <button onClick={() => setShowAllSpeakers(true)}
+                  className="px-4 py-1 text-slate-500 hover:text-slate-300 text-xs transition w-full text-left">
+                  show {hiddenCount} more…
+                </button>
+              )}
+              {showAllSpeakers && sorted.length > 3 && (
+                <button onClick={() => setShowAllSpeakers(false)}
+                  className="px-4 py-1 text-slate-500 hover:text-slate-300 text-xs transition w-full text-left">
+                  show less
+                </button>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Music Assistant */}
@@ -1280,42 +1323,6 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                 {preset.id === 1 ? 'Piazolla' : preset.name.replace(/ Radio$/i, '')}
               </button>
             ))}
-          </div>
-        </div>
-      )}
-
-
-      {otherSpeakers && otherSpeakers.length > 0 && (
-        <div className="px-4 py-3 border-t border-slate-700/60">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider">Include</h3>
-            <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
-              <input type="checkbox" checked={!!stopRestartEnabled} onChange={onToggleStopRestart}
-                className="w-3 h-3 accent-blue-500" />
-              Stop &amp; restart
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {otherSpeakers.map(spk => {
-              const isSelected = pendingGroups?.[group.masterIp]?.has(spk.ip);
-              return (
-                <button key={spk.ip}
-                  onClick={async () => {
-                    const willAdd = !isSelected;
-                    onTogglePendingMember(group.masterIp, spk.ip);
-                    if (willAdd && !isStandby) {
-                      const err = await onJoinNow(group.masterIp, spk.ip);
-                      if (err) setFavStatus('Join failed: ' + err);
-                    }
-                  }}
-                  className={'px-2 py-1 rounded text-xs transition ' +
-                    (isSelected
-                      ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                      : 'bg-slate-700 hover:bg-slate-600 text-slate-200')}>
-                  {spk.name}
-                </button>
-              );
-            })}
           </div>
         </div>
       )}
@@ -1642,11 +1649,24 @@ function AllSpeakersView() {
     });
     const finalMerged = merged.filter(g => !phantomGroupedIps.has(g.masterIp));
 
-    // Sort: fixed order matching constants.js (always, regardless of discovery order)
+    // Sort: active multi-speaker groups first, then solo playing, then idle.
+    // Within each tier, preserve SPEAKERS constant order.
     const ipOrder = {};
     SPEAKERS.forEach((s, i) => { ipOrder[s.ip] = i; });
     const groupRank = g => Math.min(...g.speakers.map(s => ipOrder[s.ip] ?? 999));
-    finalMerged.sort((a, b) => groupRank(a) - groupRank(b));
+    const isGroupActive = g => g.speakers.some(s =>
+      s.playStatus === 'PLAY_STATE' ||
+      (s.nowPlaying?.source && s.nowPlaying.source !== 'STANDBY' && s.nowPlaying.source !== 'INVALID_SOURCE')
+    );
+    finalMerged.sort((a, b) => {
+      const aMulti = a.speakers.length > 1 ? 0 : 1;
+      const bMulti = b.speakers.length > 1 ? 0 : 1;
+      if (aMulti !== bMulti) return aMulti - bMulti;
+      const aActive = isGroupActive(a) ? 0 : 1;
+      const bActive = isGroupActive(b) ? 0 : 1;
+      if (aActive !== bActive) return aActive - bActive;
+      return groupRank(a) - groupRank(b);
+    });
 
     return finalMerged;
   }, [speakerData, maGroups]);
@@ -1827,7 +1847,9 @@ function AllSpeakersView() {
       }
       return;
     }
-    // When powering off a speaker playing via MA/AirPlay, stop+clear MA queues so it won't auto-restart
+    // When powering off a speaker playing via MA/AirPlay:
+    // - If it's a group MEMBER (not leader): only ungroup it, don't stop the queue (leader keeps playing)
+    // - If it's the group LEADER or playing solo: stop+clear so HA won't auto-restart
     if (key === 'POWER') {
       const src = speakerData[ip]?.nowPlaying?.source;
       const name = speakerData[ip]?.name;
@@ -1837,8 +1859,9 @@ function AllSpeakersView() {
       const isAuxRedirect = src === 'AUX' && speakerQueue && redirectMap[speakerQueue];
 
       if (src === 'AIRPLAY' || isAuxRedirect) {
-        if (src === 'AIRPLAY') {
-          // Stop+clear MA queues so HA won't auto-restart
+        const isGroupMember = maGroups.some(g => g.members && g.members.includes(name));
+        if (!isGroupMember && src === 'AIRPLAY') {
+          // Solo or group leader — stop+clear so HA won't auto-restart playback
           const airplayGroupId = haConfig?.queues?.airplayGroup;
           const queuesToKill = [...new Set([speakerQueue, airplayGroupId].filter(Boolean))];
           queuesToKill.forEach(queueId => {
@@ -1846,7 +1869,7 @@ function AllSpeakersView() {
             fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId }) });
           });
         }
-        // Unjoin from MA group so the UI card separates
+        // Always ungroup so the UI card separates and MA releases the speaker
         if (name) {
           fetch('/ha/group-remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ speakerName: name }) })
             .then(() => setTimeout(() => fetchMaGroups(), 1500))
@@ -1927,38 +1950,30 @@ function AllSpeakersView() {
     }).then(() => setTimeout(pollAll, 1000));
   };
 
-  // Stop queue, join new speaker, wait for AirPlay group to form, restart station
-  const doStopJoinRestart = async (leaderIp, memberIp, leaderName, memberName, queueId, stationUri) => {
+  const doStopJoinRestart = async (leaderIp, memberIp, leaderName, memberName, queueId) => {
     const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    // Radio URIs are live streams — stop+restart so the new speaker gets audio from "now".
-    // WiiM now uses AirPlay (can_group_with populated) and needs stop+restart to join a running
-    // AirPlay session — the stream must restart to include the new AirPlay endpoint. Use a longer
-    // delay for WiiM (AirPlay group formation takes more time than Bose-only groups).
-    const memberIsWiiM = speakerData[memberIp]?.brand === 'wiim';
-    const isRadioUri = stationUri && /^(library:\/\/radio\/|pandora:\/\/|radiobrowser:\/\/)/.test(stationUri);
-    const zoneAllowsStopRestart = stopRestartByZone[leaderIp] !== false;
-    const doStopRestart = zoneAllowsStopRestart && (isRadioUri || haConfig?.features?.stopRestartOnGroupJoin === true);
-    if (doStopRestart && queueId && stationUri) {
-      await post('/ha/stop', { queueId });
-      await post('/ha/clear', { queueId });
-    } else if (doStopRestart && queueId && !stationUri) {
-      console.warn('[doStopJoinRestart] stopRestartOnGroupJoin enabled but no stationUri — joining without restart');
-    }
-    // Before AirPlay grouping: dissolve any native WiiM multiroom groups the speakers are in.
-    // A WiiM locked in a native group won't respond correctly to MA AirPlay grouping.
+
+    // Dissolve native WiiM multiroom first so WiiM responds to AirPlay grouping correctly.
     const wiimsToUngroup = [leaderIp, memberIp].filter(wip => speakerData[wip]?.brand === 'wiim');
     if (wiimsToUngroup.length > 0) {
       await Promise.allSettled(wiimsToUngroup.map(wip => post('/wiim/ungroup', { ip: wip })));
     }
+
+    // Join while playing — MA set_members should extend the live AirPlay session.
     try {
       const res = await post('/ha/group-include', { masterName: leaderName, speakerNames: [memberName] });
       const d = await res.json();
+      console.log('[doStopJoinRestart] group-include result:', JSON.stringify(d));
       if (!d.ok) console.error('[doStopJoinRestart] group-include failed:', d.error);
     } catch (e) { console.warn('[doStopJoinRestart] error:', e); }
-    if (doStopRestart && queueId && stationUri) {
-      await new Promise(r => setTimeout(r, memberIsWiiM ? 1500 : 500));
-      await post('/ha/play', { queueId, uri: stationUri });
-    }
+
+    // After join, verify MA group state
+    try {
+      const r = await fetch('/ha/ma-players');
+      const d = await r.json();
+      console.log('[doStopJoinRestart] MA players after join:', JSON.stringify(d.players));
+    } catch {}
+
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
   };
 
@@ -1968,35 +1983,20 @@ function AllSpeakersView() {
     const leaderSource = speakerData[leaderIp]?.nowPlaying?.source;
     const hasWiiM = speakerData[memberIp]?.brand === 'wiim' || speakerData[leaderIp]?.brand === 'wiim';
 
-    if (leaderName && memberName && haConfig?.speakerEntities?.[leaderName] &&
-        (leaderSource === 'AIRPLAY' || leaderSource === 'AUX')) {
+    const hasMAEntity = !!(leaderName && haConfig?.speakerEntities?.[leaderName]);
+    // Use MA grouping for any MA-managed speaker not playing native UPnP.
+    // Covers AirPlay, Pandora, Spotify, Apple Music, AUX — any source MA can manage.
+    // Native UPNP (direct NAS) still uses Bose zone grouping.
+    if (hasMAEntity && memberName && leaderSource !== 'UPNP') {
       const queueId = haConfig?.speakerQueues?.[leaderName];
-      // Fetch the station URI: prefer in-memory map (exact URI used at play time),
-      // fall back to current queue item URI (survives server restarts)
-      let stationUri = null;
-      if (queueId) {
-        try {
-          const r = await fetch('/ha/station-uri?queueId=' + encodeURIComponent(queueId));
-          const d = await r.json();
-          stationUri = d.uri || null;
-        } catch (e) { console.warn('[joinSpeakerNow] station-uri fetch failed:', e); }
-        if (!stationUri) {
-          try {
-            const r2 = await fetch('/ha/queue-uri?queueId=' + encodeURIComponent(queueId));
-            const d2 = await r2.json();
-            stationUri = d2.uri || null;
-            if (stationUri) console.log('[joinSpeakerNow] using queue-uri fallback:', stationUri);
-          } catch (e) { console.warn('[joinSpeakerNow] queue-uri fallback failed:', e); }
-        }
-      }
-      return await doStopJoinRestart(leaderIp, memberIp, leaderName, memberName, queueId, stationUri)
+      return await doStopJoinRestart(leaderIp, memberIp, leaderName, memberName, queueId)
         .then(() => null)
         .catch(e => e.message);
-    } else if (leaderName && !haConfig?.speakerEntities?.[leaderName]) {
+    } else if (leaderName && !hasMAEntity) {
       console.warn('[joinSpeakerNow] no HA entity for leader:', leaderName);
     }
-    // Only set up Bose zone for non-AirPlay sources
-    if (!hasWiiM && leaderSource !== 'AIRPLAY' && leaderSource !== 'AUX') {
+    // Bose zone grouping only for native UPnP/NAS direct or speakers without MA entity
+    if (!hasWiiM && (leaderSource === 'UPNP' || !hasMAEntity)) {
       await addSpeakerToGroup(leaderIp, memberIp);
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);

@@ -56,16 +56,21 @@ async function maPost(command, args) {
   });
 }
 
-const stopQueue    = (queueId)              => maPost('player_queues/stop',       { queue_id: queueId });
-const clearQueue   = (queueId)              => maPost('player_queues/clear',      { queue_id: queueId });
-const stopPlayer   = (playerId)             => maPost('players/stop',             { player_id: playerId });
-const getAllPlayers = ()                     => maPost('players/all',             {});
-const setMembers   = (playerId, members)    => maPost('players/set_members',      { player_id: playerId, members });
-const pauseQueue   = (queueId)              => maPost('player_queues/pause',      { queue_id: queueId });
-const resumeQueue  = (queueId)              => maPost('player_queues/play',       { queue_id: queueId });
-const nextTrack    = (queueId)              => maPost('player_queues/next',       { queue_id: queueId });
-const prevTrack    = (queueId)              => maPost('player_queues/previous',   { queue_id: queueId });
-const getAllQueues  = ()                     => maPost('player_queues/all',        {});
-const playMedia = (queueId, uri) => maPost('player_queues/play_media', { queue_id: queueId, media: uri, option: 'play' });
+const stopQueue    = (queueId)                       => maPost('player_queues/stop',          { queue_id: queueId });
+const clearQueue   = (queueId)                       => maPost('player_queues/clear',         { queue_id: queueId });
+const stopPlayer   = (playerId)                      => maPost('players/stop',                { player_id: playerId });
+const getAllPlayers = ()                              => maPost('players/all',                 {});
+// Add a single player to a target player's group (join-while-playing supported via AirPlay ring buffer)
+const groupPlayer  = (playerId, targetPlayer)        => maPost('players/cmd/group',           { player_id: playerId, target_player: targetPlayer });
+// Remove a single player from its current group
+const ungroupPlayer = (playerId)                     => maPost('players/cmd/ungroup',         { player_id: playerId });
+// Set the full member list for a group (use groupPlayer for single-speaker adds)
+const setMembers   = (targetPlayer, playerIdsToAdd)  => maPost('players/cmd/set_members',     { target_player: targetPlayer, player_ids_to_add: playerIdsToAdd });
+const pauseQueue   = (queueId)                       => maPost('player_queues/pause',         { queue_id: queueId });
+const resumeQueue  = (queueId)                       => maPost('player_queues/play',          { queue_id: queueId });
+const nextTrack    = (queueId)                       => maPost('player_queues/next',          { queue_id: queueId });
+const prevTrack    = (queueId)                       => maPost('player_queues/previous',      { queue_id: queueId });
+const getAllQueues  = ()                              => maPost('player_queues/all',           {});
+const playMedia    = (queueId, uri)                  => maPost('player_queues/play_media',    { queue_id: queueId, media: uri, option: 'play' });
 
-module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, reloadConfig, getConfig };
+module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, reloadConfig, getConfig };

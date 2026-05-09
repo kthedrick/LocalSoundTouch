@@ -1,7 +1,7 @@
 // HTTP handler for /ha/* routes — Music Assistant integration
 
 const http = require('http');
-const { stopQueue, clearQueue, getAllPlayers, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
+const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
 
 // Track the station URI most recently played on each queue (for stop→rejoin→restart)
 const activeStationUris = {};
@@ -341,6 +341,7 @@ async function handleHa(req, res) {
     const body = await readBody(req);
     try {
       await stopQueue(body.queueId);
+      console.log('[ha/stop] queueId=%s', body.queueId);
       ok(res, {});
     } catch (e) { err(res, e.message); }
     return;
@@ -376,9 +377,10 @@ async function handleHa(req, res) {
   if (url === '/ha/resume' && req.method === 'POST') {
     const body = await readBody(req);
     try {
-      await resumeQueue(body.queueId);
+      const result = await resumeQueue(body.queueId);
+      console.log('[ha/resume] queueId=%s result=%j', body.queueId, result);
       ok(res, {});
-    } catch (e) { err(res, e.message); }
+    } catch (e) { console.error('[ha/resume] error:', e.message); err(res, e.message); }
     return;
   }
 
@@ -503,6 +505,30 @@ async function handleHa(req, res) {
     return;
   }
 
+  // GET /ha/ma-players — return MA player state including group info (for debugging)
+  if (url === '/ha/ma-players' && req.method === 'GET') {
+    try {
+      const players = await getAllPlayers();
+      const cfg = getConfig();
+      const nameToQueue = {};
+      for (const [name, queueId] of Object.entries(cfg.speakerQueues || {})) nameToQueue[name] = queueId;
+      const queueToName = Object.fromEntries(Object.entries(nameToQueue).map(([n, q]) => [q, n]));
+      const summary = (Array.isArray(players) ? players : [])
+        .filter(p => queueToName[p.player_id])
+        .map(p => ({
+          name: queueToName[p.player_id],
+          player_id: p.player_id,
+          state: p.state,
+          synced_to: p.synced_to,
+          synced_to_name: p.synced_to ? queueToName[p.synced_to] : null,
+          can_group_with: (p.can_group_with || []).map(id => queueToName[id] || id),
+          powered: p.powered,
+        }));
+      ok(res, { players: summary });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   // POST /ha/debug — log client state for debugging
   if (url === '/ha/debug' && req.method === 'POST') {
     const body = await readBody(req);
@@ -513,56 +539,60 @@ async function handleHa(req, res) {
 
   // POST /ha/group-include — join speakers into master's MA group
   // Accepts { masterName, speakerName } (single) or { masterName, speakerNames } (array)
+  // Uses MA players/cmd/group — correct command for live AirPlay late-join (ring buffer).
   if (url === '/ha/group-include' && req.method === 'POST') {
     const body = await readBody(req);
-    const masterEntity = speakerNameToEntityId(body.masterName);
     const names = body.speakerNames || (body.speakerName ? [body.speakerName] : []);
-    const targetEntities = names.map(n => speakerNameToEntityId(n)).filter(Boolean);
-    if (!masterEntity || targetEntities.length === 0) {
-      const missing = !masterEntity ? body.masterName : names.filter(n => !speakerNameToEntityId(n)).join(', ');
-      err(res, `No HA entity mapped for: ${missing}`);
+    if (!body.masterName || names.length === 0) {
+      err(res, 'masterName and speakerNames required');
       return;
     }
     try {
-      // Build the complete current group via union-find across all entity states.
-      // Fetching only the leader's state misses members the leader hasn't yet reflected
-      // (HA/MA state sync is inconsistent — some entities update faster than others).
-      let existingMembers = [];
-      try {
-        const allStates  = await haGet('/api/states');
-        const entityIds  = new Set(Object.values(getConfig().speakerEntities || {}));
-        const membersMap = {};
-        if (Array.isArray(allStates)) {
-          for (const s of allStates) {
-            if (entityIds.has(s.entity_id))
-              membersMap[s.entity_id] = s.attributes?.group_members || [];
-          }
-        }
-        // Walk outward from the leader to collect all transitively grouped entities
-        const groupSet = new Set([masterEntity]);
-        let changed = true;
-        while (changed) {
-          changed = false;
-          for (const [eid, members] of Object.entries(membersMap)) {
-            if (!groupSet.has(eid)) continue;
-            for (const m of members) {
-              if (entityIds.has(m) && !groupSet.has(m)) { groupSet.add(m); changed = true; }
-            }
-          }
-        }
-        existingMembers = [...groupSet].filter(e => e !== masterEntity);
-      } catch (e) {
-        console.warn('[ha/group-include] could not fetch existing members:', e.message);
-      }
-      const allMembers = [...new Set([...existingMembers, ...targetEntities])];
-      console.log('[ha/group-include] existing=%s new=%s', existingMembers.join(','), targetEntities.join(','));
+      const cfg = getConfig();
+      const maPlayers = await getAllPlayers();
 
-      const result = await haServicePost('/api/services/media_player/join', {
-        entity_id: masterEntity,
-        group_members: allMembers,
-      });
-      console.log('[ha/group-include] %s + [%s] → status=%d', masterEntity, allMembers.join(', '), result.status);
-      ok(res, { status: result.status });
+      // Build maps: queue/player_id ↔ speaker name
+      const nameToQueue = {};
+      const queueToName = {};
+      for (const [name, queueId] of Object.entries(cfg.speakerQueues || {})) {
+        nameToQueue[name] = queueId;
+        queueToName[queueId] = name;
+      }
+
+      // Find the true MA leader: the non-idle player with synced_to=null that belongs to
+      // a known speaker. HA entity state is unreliable when multiple members show identical
+      // group_members lists — use MA's synced_to field instead.
+      let leaderPlayerId = nameToQueue[body.masterName];
+      for (const player of (maPlayers || [])) {
+        if (player.synced_to === null && player.state !== 'idle' && queueToName[player.player_id]) {
+          if (player.player_id !== leaderPlayerId) {
+            console.log('[ha/group-include] correcting leader: %s → %s', leaderPlayerId, player.player_id);
+            leaderPlayerId = player.player_id;
+          }
+          break;
+        }
+      }
+
+      if (!leaderPlayerId) {
+        err(res, `No MA player ID for leader: ${body.masterName}`);
+        return;
+      }
+
+      // players/cmd/group adds a single player to the target's AirPlay group.
+      // MA's AirPlay provider supports late-join via ring buffer — no stop needed.
+      const results = [];
+      for (const name of names) {
+        const memberId = nameToQueue[name];
+        if (!memberId) {
+          console.warn('[ha/group-include] no player ID for %s, skipping', name);
+          continue;
+        }
+        console.log('[ha/group-include] cmd/group: %s → leader %s', memberId, leaderPlayerId);
+        const r = await groupPlayer(memberId, leaderPlayerId);
+        console.log('[ha/group-include] cmd/group result:', JSON.stringify(r).slice(0, 200));
+        results.push({ name, memberId, result: r });
+      }
+      ok(res, { status: 200, results });
     } catch (e) {
       console.error('[ha/group-include] error:', e.message);
       err(res, e.message);
@@ -584,19 +614,19 @@ async function handleHa(req, res) {
   }
 
   // POST /ha/group-remove — unjoin a speaker from its MA group { speakerName }
+  // Uses MA players/cmd/ungroup directly (mirrors how group-include uses players/cmd/group).
   if (url === '/ha/group-remove' && req.method === 'POST') {
     const body = await readBody(req);
-    const targetEntity = speakerNameToEntityId(body.speakerName);
-    if (!targetEntity) {
-      err(res, `No HA entity mapped for: ${body.speakerName}`);
+    const cfg = getConfig();
+    const playerId = cfg.speakerQueues?.[body.speakerName];
+    if (!playerId) {
+      err(res, `No MA player ID for: ${body.speakerName}`);
       return;
     }
     try {
-      const result = await haServicePost('/api/services/media_player/unjoin', {
-        entity_id: targetEntity,
-      });
-      console.log('[ha/group-remove] %s → status=%d', targetEntity, result.status);
-      ok(res, { status: result.status });
+      const result = await ungroupPlayer(playerId);
+      console.log('[ha/group-remove] cmd/ungroup %s (%s) result: %j', body.speakerName, playerId, result);
+      ok(res, { status: 200 });
     } catch (e) {
       console.error('[ha/group-remove] error:', e.message);
       err(res, e.message);
@@ -606,25 +636,37 @@ async function handleHa(req, res) {
     return;
   }
 
-  // GET /ha/group-state — return active MA speaker groups from HA entity state
+  // GET /ha/group-state — return active MA speaker groups
+  // Primary: MA players/all synced_to field (updates immediately after players/cmd/group).
+  // Supplementary: HA entity group_members (catches WiiM and other non-speakerQueues speakers).
   if (url === '/ha/group-state' && req.method === 'GET') {
     try {
       const cfg = getConfig();
       const entityMap = cfg.speakerEntities || {};
-      // Build reverse map: entity_id → speaker_name
       const reverseMap = {};
       for (const [name, entityId] of Object.entries(entityMap)) reverseMap[entityId] = name;
 
-      // Fetch all HA states and filter to our MA entities
-      const allStates = await haGet('/api/states');
+      // Build name↔queue maps for MA player lookup
+      const nameToQueue = {};
+      const queueToName = {};
+      for (const [name, queueId] of Object.entries(cfg.speakerQueues || {})) {
+        nameToQueue[name] = queueId;
+        queueToName[queueId] = name;
+      }
+
+      // Fetch HA states and MA players in parallel
+      const [allStates, maPlayers] = await Promise.all([
+        haGet('/api/states'),
+        getAllPlayers().catch(() => []),
+      ]);
+
+      // ── Step 1: HA-based group detection ────────────────────────────────────
+      // Catches WiiM speakers and any speaker not in speakerQueues.
       const entityIds = new Set(Object.values(entityMap));
       const maStates = Array.isArray(allStates)
         ? allStates.filter(s => entityIds.has(s.entity_id))
         : [];
 
-      // Find groups: the leader entity lists other known entities in its group_members.
-      // MA/HA behavior varies — sometimes leader includes itself in the list, sometimes not.
-      // Use deduplication by member set to avoid symmetric duplicates.
       const groups = [];
       const seenKeys = new Set();
       for (const state of maStates) {
@@ -640,9 +682,7 @@ async function handleHa(req, res) {
         groups.push({ leader: leaderName, members: memberNames });
       }
 
-      // Drop any group whose full speaker set is a strict subset of another group's set.
-      // This happens when one entity has stale group_members (e.g. missing a late joiner)
-      // while other entities in the same group have an up-to-date view.
+      // Drop strict subsets (stale entities with incomplete group_members)
       const fullSets = groups.map(g => new Set([g.leader, ...g.members]));
       const filtered = groups.filter((_, i) =>
         !fullSets.some((other, j) =>
@@ -650,6 +690,55 @@ async function handleHa(req, res) {
           [...fullSets[i]].every(m => other.has(m))
         )
       );
+
+      // ── Step 2: MA synced_to supplementation ────────────────────────────────
+      // players/cmd/group updates MA state immediately but HA entity state lags.
+      // For each player that has synced_to set, ensure it appears in the right group.
+      if (Array.isArray(maPlayers)) {
+        for (const player of maPlayers) {
+          const memberName = queueToName[player.player_id];
+          const leaderName = queueToName[player.synced_to];
+          if (!memberName || !leaderName || !player.synced_to) continue;
+
+          // Find existing group that contains the leader or member
+          let group = filtered.find(g =>
+            g.leader === leaderName || g.members.includes(leaderName) ||
+            g.leader === memberName || g.members.includes(memberName)
+          );
+          if (!group) {
+            // No HA group yet — create one from MA data alone
+            group = { leader: leaderName, members: [] };
+            filtered.push(group);
+          }
+          // Ensure leader is correct and member is present
+          if (group.leader !== leaderName && !group.members.includes(leaderName)) {
+            group.members.push(leaderName);
+          }
+          if (group.leader !== memberName && !group.members.includes(memberName)) {
+            group.members.push(memberName);
+          }
+        }
+      }
+
+      // ── Step 3: Leader correction using MA synced_to=null ───────────────────
+      // The player with synced_to=null owns the active queue; promote it to leader.
+      if (Array.isArray(maPlayers)) {
+        for (const group of filtered) {
+          const allNames = new Set([group.leader, ...group.members]);
+          const trueLeader = maPlayers.find(p => {
+            const name = queueToName[p.player_id];
+            return name && allNames.has(name) && p.synced_to === null && p.state !== 'idle';
+          });
+          if (trueLeader) {
+            const trueLeaderName = queueToName[trueLeader.player_id];
+            if (trueLeaderName && trueLeaderName !== group.leader) {
+              group.members = group.members.filter(m => m !== trueLeaderName);
+              group.members.push(group.leader);
+              group.leader = trueLeaderName;
+            }
+          }
+        }
+      }
 
       ok(res, { groups: filtered });
     } catch (e) { err(res, e.message); }
