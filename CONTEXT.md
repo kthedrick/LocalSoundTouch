@@ -67,7 +67,9 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 **`maClient.js`** — thin MA API client (no npm):
 - `maPost(command, args)` — authenticated POST to MA REST API
 - `playMedia(queueId, uri)` — play a URI on a specific queue (`option: 'replace'`)
-- `stopQueue`, `clearQueue`, `pauseQueue`, `resumeQueue`, `nextTrack`, `prevTrack`, `getAllQueues`
+- `groupPlayer(playerId, targetPlayer)` — `players/cmd/group`: add a player to a target's live AirPlay group
+- `ungroupPlayer(playerId)` — `players/cmd/ungroup`: remove a player from its current group
+- `stopQueue`, `clearQueue`, `pauseQueue`, `resumeQueue`, `nextTrack`, `prevTrack`, `getAllQueues`, `getAllPlayers`
 - Config (token, URL, queue IDs) read from `haConfig.json`
 
 **`haHandler.js`** — HTTP routes for MA and HA:
@@ -75,7 +77,8 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 |-------|---------|
 | `GET /ha/config` | Returns safe config (queues, speakerQueues, speakerEntities, favorites, playRedirects) for the UI |
 | `GET /ha/queues` | Lists all MA queues (discovery/debug) |
-| `GET /ha/group-state` | Returns active MA sync groups by polling HA entity `group_members` attributes |
+| `GET /ha/ma-players` | Returns MA player states including `synced_to`, `state`, `can_group_with` |
+| `GET /ha/group-state` | Returns active MA sync groups. Primary source: MA `players/all` `synced_to` field (immediate). Supplementary: HA entity `group_members` (catches WiiM). |
 | `GET /ha/queue-now-playing?queueId=` | Returns track/artist/art/duration/position from MA queue |
 | `GET /ha/raw-states` | Dumps raw HA entity states for all speakerEntities (debug) |
 | `GET /ha/ma-entities` | Lists all non-STP media_player entities from HA (debug/discovery) |
@@ -86,8 +89,8 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 | `POST /ha/prev` | Previous track |
 | `POST /ha/play` | Play a URI `{ queueId, uri }` — checks `playRedirects` before playing |
 | `POST /ha/clear` | Clear a queue |
-| `POST /ha/group-include` | Join speaker into MA group via HA `media_player.join` `{ masterName, speakerName }` |
-| `POST /ha/group-remove` | Unjoin speaker from MA group via HA `media_player.unjoin` `{ speakerName }` |
+| `POST /ha/group-include` | Join speaker(s) into MA group via `players/cmd/group`. For speakers with `playRedirects` (e.g. Bose-Bedroom), uses the redirect's `toQueue` (Belkin) not the Bose's own queue. Also fires `boseSwitchInput` for AUX redirect speakers. `{ masterName, speakerNames }` |
+| `POST /ha/group-remove` | Unjoin speaker from MA group via `players/cmd/ungroup`. Uses `playRedirects.toQueue` when applicable. `{ speakerName }` |
 
 **`haConfig.json`** — MA + HA configuration (deployed via deploy.sh, NOT git-tracked):
 
@@ -95,27 +98,45 @@ Key sections:
 - `haUrl` / `haToken` — HA REST API base URL and long-lived token (separate from MA token)
 - `maUrl` / `maToken` — MA REST API and token
 - `queues` — named MA queue IDs for internal use
-- `speakerQueues` — maps Bose speaker name → MA queue ID (used for per-speaker favorites + skip/prev routing)
-- `speakerEntities` — maps Bose speaker name → HA `media_player` entity ID (used for MA grouping via HA)
+- `speakerQueues` — maps speaker name → MA queue/player ID (used for per-speaker favorites, skip/prev routing, and MA grouping). For Bose-Bedroom, this is the Bose's own queue (`up04a316bee3e0`) used as the intercept key — actual AirPlay grouping uses the Belkin queue from `playRedirects.toQueue`.
+- `speakerEntities` — maps speaker name → HA `media_player` entity ID (used for HA-based group state detection). For Bose-Bedroom: Belkin entity (`media_player.bose_bathroom2`).
 - `releaseToTV` — list of speaker names that show the "Release to TV" button
 - `favorites` — list of `{ name, icon, uri, defaultQueueId }` shown as one-tap play buttons
 - `groupSideEffects` — rules that flip HA switches when specific speakers are grouped/ungrouped
-- `playRedirects` — intercepts `/ha/play` for speakers needing special routing (e.g. Bedroom → Belkin AUX)
+- `playRedirects` — intercepts `/ha/play` for speakers needing special routing (e.g. Bedroom → Belkin AUX). Also used by `group-include` and `group-remove` to find the correct MA player ID for AirPlay grouping.
 - `presetActions` — maps speaker name → preset ID → MA URI. When a Bose preset button fires `nowSelectionUpdated`, this is checked first for an instant MA play. Example: `{ "Bose-Bathroom": { "5": "library://radio/1" } }`
 - `invalidSourceFallback` — `{ "uri": "..." }` — polling fallback for any dead preset not in `presetActions`. Per-speaker override: `"Bose-Joshua": { "uri": "..." }` nested inside.
 
 **MA API details (confirmed working):**
 - REST endpoint: `POST http://localhost:8095/api` with `{ command, args }` and Bearer MA token
 - `play_media` args: `{ queue_id, media: uri, option: 'replace' }` — use `media` NOT `uri`; `option` must be string not int
-- Queue IDs: `up` + MAC fragment for Bose/UPnP; `syncgroup_*` for AirPlay groups; `upuuid*` for some AirPlay adapters
-- Grouping is NOT available in MA REST API — use HA `media_player.join`/`unjoin` instead
-- MA token: long-lived JWT from HA → Settings → People → user → Long-Lived Access Tokens
+- `players/cmd/group` args: `{ player_id, target_player }` — adds `player_id` to `target_player`'s live AirPlay group. Returns `null` on success (normal).
+- `players/cmd/ungroup` args: `{ player_id }` — removes player from its current group.
+- Queue/player IDs: `up` + MAC fragment for Bose/UPnP; `syncgroup_*` for AirPlay sync groups; `upuuid*` for UUID-based AirPlay devices (Belkin)
+- Grouping IS available via MA REST API: `players/cmd/group` and `players/cmd/ungroup`. HA `media_player.join`/`unjoin` is NOT used for grouping (it maps to MA's group mechanism, not sync — doesn't work for WiiM which uses `synced_to`).
+
+### `/ha/group-state` — Group Detection Logic
+
+Three-step approach (in order):
+
+**Step 1: HA entity `group_members`** — catches WiiM and other speakers not in `speakerQueues`. HA entity state lags MA by several seconds. Filtered to only speakers in `speakerEntities`. "Leader" = entity that has other known entities in its `group_members`. Strict subsets (stale HA state) are dropped.
+
+**Step 2: MA `synced_to` supplementation** — `players/all` updates immediately after `players/cmd/group`. For each player with `synced_to` set, ensures it appears in the right group. This is the primary fast-path for MA-managed speakers. `queueToName` is augmented with `playRedirects.toQueue` entries so Belkin adapter maps to "Bose-Bedroom".
+
+**Step 3: Leader correction** — promotes the player with `synced_to === null && state !== idle` to group leader. Fixes cases where HA reports the wrong entity as leader.
+
+**Key quirk:** HA `group_members` format is inconsistent:
+- Leader lists only members (not itself): `["media_player.bose_rosemary_6"]` on Joshua
+- Member lists only itself: `["media_player.bose_rosemary_6"]` on Rosemary
+- Some leaders include themselves in the list
+
+The code uses "any entity that has OTHER known entities in its group_members is a leader" — do NOT revert to `members[0] === entity_id` check.
 
 ### UI (`public/js/app2.jsx`)
 - React 18 UMD + Babel standalone (no build step)
 - Tailwind CDN
 - `AllSpeakersView` polls all speakers every 15s, builds zone groups from `/getZone` responses
-- `GroupCard` shows now-playing, volume controls, presets, Include/SyncTo, and NAS browser button
+- `GroupCard` shows now-playing, volume controls, presets, Include section, and NAS browser button
 - `NasBrowserModal` — FTP folder browser with shuffle toggle, queues tracks via `/upnp/queue`
 
 #### Key behavioral details
@@ -124,12 +145,37 @@ Key sections:
 - **AIRPLAY source routing:** When `nowPlaying.source === 'AIRPLAY'`, skip/prev/include all route through MA instead of Bose API. Power-off also calls MA stop+clear+group-remove.
 - **AUX source routing:** When source is `AUX` and a `playRedirect` exists for the speaker's queue, skip/prev route through MA on the redirect's `toQueue`. MA track data is also polled from the redirect queue.
 - **MA group display:** `AllSpeakersView` polls `/ha/group-state` every 15s. Detected MA groups are merged into Bose zone cards in the UI — members are appended to the leader's card and their standalone cards are suppressed.
+- **Phantom group detection:** Standalone speakers playing the same AirPlay track+artist within 15s of each other are detected as a phantom group and merged in the UI. Speakers in `removingMembersRef.current` are excluded from phantom detection to prevent re-absorption during ungrouping.
 - **Release to TV:** Shown only on speakers in `haConfig.releaseToTV` (Sunroom 300). Stops+clears MA queue so HA doesn't auto-restart when soundbar switches to TV.
 - **Per-speaker power button (⏻):** Shown in the speaker header row of each zone card.
-- **Sort order:** Sunroom 300 sorts first; other zones follow alphabetically.
+- **Sort order:** Active multi-speaker groups first, then active solo, then idle. Within each tier, sorted by SPEAKERS constant order (Sunroom 300 first).
 - **MA track metadata:** When source=AIRPLAY or source=AUX (with redirect), polls `/ha/queue-now-playing` for track/artist/art/duration/position. Progress bar and timer use MA data when Bose reports 0.
 - **groupSideEffects:** After any MA group change, server checks rules and flips HA switches. Currently: turns on `switch.living_room_bass` when Sunroom 300 + Living Room are grouped (bass module is physically wired to Sunroom output).
-- **playRedirects:** Intercepts `/ha/play` by matching `fromQueue`. For Bedroom: switches Bose-Bedroom to AUX1 and plays on Belkin AirPlay queue instead. Also fires `boseSwitchInput` when Bedroom is included into a group via `group-include`.
+- **playRedirects:** Intercepts `/ha/play` by matching `fromQueue`. For Bedroom: switches Bose-Bedroom to AUX1 and plays on Belkin AirPlay queue instead. Also used by `group-include` and `group-remove` to find the correct MA player ID.
+
+#### MA Grouping UI — Add/Remove Flow
+
+**Adding a speaker (live join, no stop/restart):**
+1. User clicks unchecked speaker checkbox in GroupCard
+2. `setAddingMembers(add ip)` — spinner + greyed row appears immediately in event batch
+3. `POST /ha/group-include` — MA adds speaker to AirPlay ring buffer (late-join)
+4. `fetchMaGroups()` — speaker moves from unchecked to checked section
+5. `pollAll()` — speakerData refreshes, sort settles
+6. `setAddingMembers(remove ip)` — grey clears only after sort has settled
+
+**Removing a speaker:**
+1. User clicks checked speaker checkbox in GroupCard
+2. `removingMembersRef.current.add(name)` + `setRemovingMembers(add name)` — spinner + greyed row (both in same event batch — do NOT use async function wrapper)
+3. `POST /ha/group-remove` — MA ungroups speaker
+4. `fetchMaGroups()` — speaker moves to standalone card. `removingMembersRef` still populated → phantom detection skips this speaker.
+5. `pollAll()` — speakerData refreshes (speaker's AirPlay state clears), sort settles
+6. `removingMembersRef.current.delete(name)` + `setRemovingMembers(clear)` — grey clears only after pollAll
+
+**Why `removingMembersRef` is separate from `removingMembers` state:**
+- `removingMembers` state drives the spinner/grey in the GroupCard checked section
+- `removingMembersRef` is a plain mutable ref used inside the `groups` useMemo for phantom detection
+- The ref is NOT synced from state (no `ref.current = state` in render) — it's managed imperatively
+- This ensures the phantom guard stays active through `pollAll` even after the React state is cleared, because the useMemo only re-runs on `speakerData`/`maGroups` changes (not `removingMembers` state changes)
 
 #### Key Bose API quirk
 `/getZone` sometimes returns empty `senderIPAddress`. Fix: when `senderIPAddress` is empty but members exist, infer master IP = the queried speaker's IP.
@@ -152,17 +198,29 @@ Key sections:
 
 **Bose-Bedroom special handling:**
 - Has no native AirPlay. A Belkin AirPlay adapter is connected to AUX1.
-- For Pandora playback: `playRedirects` intercepts the play call, switches Bose to AUX1, and plays on the Belkin's MA queue (`upuuidff970010315bf140af4f0142ff970010`)
-- For MA grouping: `speakerEntities["Bose-Bedroom"]` points to the Belkin's HA entity (`media_player.bose_bathroom2` — misleadingly named, was auto-assigned before renaming)
-- When Bedroom is added to an AIRPLAY group: HA joins the Belkin + Bose switches to AUX1 automatically
-- When Bedroom is master (AUX source): Bose native zoning works normally to add other speakers
+- Belkin MA player ID: `upuuidff970010315bf140af4f0142ff970010` — appears in every other speaker's `can_group_with` list but NOT as a top-level MA player. Valid target for `players/cmd/group`.
+- For Pandora playback: `playRedirects` intercepts the play call, switches Bose to AUX1 via `boseSwitchInput` (`POST 192.168.1.176:8090/select` with AUX/AUX1 ContentItem), and plays on the Belkin's MA queue.
+- For MA grouping (`group-include`/`group-remove`): uses Belkin queue ID (from `playRedirects.toQueue`), not the Bose's own queue. `boseSwitchInput` fires automatically after `group-include`.
+- `speakerEntities["Bose-Bedroom"]` = `media_player.bose_bathroom2` (Belkin HA entity — misleadingly named, was auto-assigned before renaming).
+- `speakerQueues["Bose-Bedroom"]` = `up04a316bee3e0` (Bose's own queue) — used as intercept key in `playRedirects`, NOT for AirPlay grouping.
 
-**\* HA entity ID note:** All Bose speakers use `_6` suffix (highest number = last MA entity added). Bathroom uses `_6` not `_4`. The Belkin entity `bose_bathroom2` is a legacy auto-name. Do NOT try to auto-derive entity IDs — verify via `/ha/raw-states`.
+Also present in MA (not in speakerQueues but valid group targets):
+| Device | MA Player/Queue ID | HA Entity | Notes |
+|--------|-------------------|-----------|-------|
+| WiiM Basement | up00226c2e2da2 | media_player.wiim_basement | Uses `synced_to` (not AirPlay group); `can_group_with: []` |
+| WiiM Joshua | up9cb8b438124c | media_player.wiim_joshua | AudioPro A10 with WiiM inside. After May 2026 re-pair, entity is `wiim_joshua` (not the `audiopro_a10_wiim_124c_2` MA entity). |
+| WiiM Rosemary | — | media_player.wiim_rosemary | Verify entity via /ha/ma-entities if grouping fails |
+| Belkin AirPlay (Bedroom) | upuuidff970010315bf140af4f0142ff970010 | media_player.bose_bathroom2 | UUID-based player ID (not MAC-based) |
 
-Also present in MA:
-- Joshua's WiiM (`up9cb8b438124c`, entity: media_player — verify via /ha/ma-entities)
-- Basement WiiM (`up00226c2e2da2`)
-- Belkin AirPlay (Bedroom): `upuuidff970010315bf140af4f0142ff970010`
+**\* HA entity ID note:** All Bose speakers use `_6` suffix (highest number = last MA entity added). Bathroom uses `_6` not `_4`. The Belkin entity `bose_bathroom2` is a legacy auto-name. Do NOT try to auto-derive entity IDs — verify via `/ha/raw-states` or `/ha/ma-entities`.
+
+### WiiM Grouping — Important Distinction
+
+MA uses two mechanisms for multi-speaker playback:
+1. **Group** (`can_group_with`): native AirPlay multi-room — all Bose speakers use this
+2. **Sync** (`synced_to`): one player follows another player's queue output — WiiM Basement uses this
+
+WiiM Basement has `can_group_with: []` — it **cannot lead or join an AirPlay group**. When added via MA UI, MA sets `synced_to` on WiiM (not AirPlay grouping). `players/cmd/group` is used for WiiM too (MA handles the sync internally). HA `media_player.join` maps only to MA's group mechanism and does NOT work for WiiM sync.
 
 ---
 
@@ -204,6 +262,9 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 
 ## Future TODOs
 
+### Group add/remove delays — check if removable
+After `players/cmd/group`/`ungroup`, the code waits 100ms before calling `fetchMaGroups`. This was reduced from 1000–1500ms (trial-and-error from when group-state relied on slow HA entity attributes). With MA `synced_to` as primary source (immediate), these delays may be removable entirely. Try 0ms if grouping has been reliable.
+
 ### TV Card: Episode Synopsis via TMDB/IMDb
 
 The Apple TV entity in HA exposes `media_title`, `media_series_title`, `media_season`, `media_episode`, and artwork — but no synopsis. Apple's MRP protocol doesn't broadcast episode descriptions.
@@ -214,9 +275,26 @@ Synopsis is available from:
 
 Implementation approach: in the `/ha/tv-state` handler, after fetching the Apple TV entity state, do a TMDB title search using `media_title` (plus series/season/episode if available) and append the `overview` to the response. Add a `tmdbApiKey` field to `haConfig.json`.
 
+### WiiM Rosemary grouping
+Not yet tested. Assumed same pattern as WiiM Basement (`synced_to` via `players/cmd/group`). Verify entity ID via `/ha/ma-entities` if grouping fails.
+
+### MA Search
+`music/search` command (`{ search_query, media_types, limit }`) searches across all providers including Apple Music. Could add a search box to MABrowserModal.
+
+### Server-side WebSocket subscription (queue improvement)
+**Current:** queue advances by polling `GetTransportInfo` every 3s via UPnP SOAP.  
+**Better:** use the existing boseWatcher WebSocket connection (already open on all 10 speakers) and listen for `nowPlayingUpdated` where `playStatus = STOP_STATE` and source=UPnP. Advance the queue immediately instead of waiting up to 3s.  
+**Status:** boseWatcher WebSocket is implemented and connected — adding UPnP queue advancement is a small extension to `handleWsEvent`.
+
+### HA Ingress / HTTPS
+Currently plain HTTP on LAN. Options: HA Ingress (HTTPS via HA's reverse proxy, but requires iframe-compatible UI), or Caddy/nginx on Pi. Not urgent.
+
+### Scheduled playback / alarms
+Post-May-6 stretch goal.
+
 ---
 
-### Test Cases
+## Test Cases
 
 Run these in order. Each has a setup, action, and expected result.
 
@@ -247,14 +325,14 @@ Run these in order. Each has a setup, action, and expected result.
 #### 4. MA grouping — add a second speaker
 - **Setup:** Radiohead Radio playing on Sunroom (or any single speaker)
 - **Action:** Tap the Include (+) button, select another speaker (e.g. Kitchen)
-- **Expected:** Both speakers play in sync. UI merges into one card. Track info visible on the combined card.
+- **Expected:** Both speakers play in sync. Spinner shows during join, row greys. UI merges into one card. Track info visible on the combined card.
 
 ---
 
-#### 5. MA group — remove a speaker (X button)
+#### 5. MA group — remove a speaker
 - **Setup:** Sunroom + Kitchen grouped and playing
-- **Action:** Tap X on Kitchen within the group card
-- **Expected:** Kitchen separates back to its own card (idle). Sunroom card continues playing solo.
+- **Action:** Uncheck Kitchen within the group card
+- **Expected:** Spinner shows in grouped section, row greys. Kitchen separates to its own card in one move (no intermediate phantom state). Row ungreys only after speakerData has refreshed.
 
 ---
 
@@ -283,14 +361,14 @@ Run these in order. Each has a setup, action, and expected result.
 #### 9. Bedroom — add to Pandora group (Bedroom as follower)
 - **Setup:** Radiohead Radio playing on Sunroom
 - **Action:** Include Bose-Bedroom into the Sunroom group
-- **Expected:** Bose-Bedroom switches to AUX1 (Belkin joins the AirPlay group). Bedroom card merges with Sunroom. Audio audible in Bedroom.
+- **Expected:** Bose-Bedroom switches to AUX1 (Belkin joins the AirPlay group via `upuuidff970010315bf140af4f0142ff970010`). Bedroom card merges with Sunroom. Audio audible in Bedroom.
 
 ---
 
-#### 10. Power off Bedroom while grouped
+#### 10. Bedroom — remove from Pandora group
 - **Setup:** Bedroom grouped with Sunroom (Pandora playing)
-- **Action:** Tap power on Bedroom card
-- **Expected:** Bedroom separates back to its own card. Sunroom continues playing. HA unjoins the Belkin entity.
+- **Action:** Uncheck Bedroom in the group card
+- **Expected:** Bedroom separates to its own card. Sunroom continues playing. Belkin unjoined from AirPlay group.
 
 ---
 
@@ -302,7 +380,7 @@ Run these in order. Each has a setup, action, and expected result.
 ---
 
 #### 12. Bathroom + Bedroom not permanently linked (regression check)
-- **Setup:** Play and group Bathroom + Bedroom together, then separate them (X button or power off one)
+- **Setup:** Play and group Bathroom + Bedroom together, then separate them
 - **Expected:** Cards separate cleanly. `/ha/group-state` shows no lingering group between them. Debug: `http://homeassistant:3000/ha/raw-states`
 
 ---
@@ -330,6 +408,8 @@ Run these in order. Each has a setup, action, and expected result.
 - **Action:** Power off Sunroom speaker
 - **Expected:** HA does NOT restart Pandora automatically. MA queue is stopped and cleared. Sunroom card shows standby.
 
+---
+
 ### Pandora station URI
 `library://radio/2` works but needs monitoring. If MA resets Pandora auth, the URI may change. Verify by playing in MA UI and checking `/ha/queues` for the active `current_item.media_item.uri`.
 
@@ -337,24 +417,7 @@ Run these in order. Each has a setup, action, and expected result.
 MA's `player_queues/next` does nothing for Pandora radio stations. The app works around this by doing pause→play instead (see `haHandler.js` `/ha/next` handler and the `isPandoraNext` flag in `app2.jsx`). If a future MA update fixes this, remove the `body.pandora` branch in the server handler and the `isPandoraNext` detection on the client.
 
 ### More favorites
-Only Radiohead Radio is in `haConfig.favorites`. Easy to add more once Pandora is stable.
-
-### WiiM speaker support
-WiiM devices are excellent UPnP renderers — NAS/UPnP playback stack works unchanged. What needs work:
-- Volume, mute, now-playing: WiiM uses Linkplay HTTP API (different endpoints, JSON) instead of Bose port 8090 XML
-- Zones/grouping: WiiM has its own multiroom protocol, not compatible with Bose `/setZone`
-- Right approach: abstract speaker control into a per-brand adapter (Bose, WiiM) with common interface
-
-### Server-side WebSocket subscription (queue improvement)
-**Current:** queue advances by polling `GetTransportInfo` every 3s via UPnP SOAP.  
-**Better:** use the existing boseWatcher WebSocket connection (already open on all 10 speakers) and listen for `nowPlayingUpdated` where `playStatus = STOP_STATE` and source=UPnP. Advance the queue immediately instead of waiting up to 3s.  
-**Status:** boseWatcher WebSocket is implemented and connected — adding UPnP queue advancement is a small extension to `handleWsEvent`.
-
-### HA Ingress / HTTPS
-Currently plain HTTP on LAN. Options: HA Ingress (HTTPS via HA's reverse proxy, but requires iframe-compatible UI), or Caddy/nginx on Pi. Not urgent.
-
-### Scheduled playback / alarms
-Post-May-6 stretch goal.
+Only Radiohead Radio, Yo-Yo Ma Radio, and 99.5 WCRB are in `haConfig.favorites`. Easy to add more once Pandora is stable.
 
 ---
 
@@ -425,9 +488,6 @@ Polls `/now_playing` on each speaker every 15s. Detects `INVALID_SOURCE` transit
 "presetActions": {
   "Bose-Bathroom":    { "5": "library://radio/1" },
   "Bose-Joshua":      { "5": "library://radio/1" },
-  "Bose-Rosemary":    { "5": "library://radio/1" },
-  "Bose-Sunroom 300": { "5": "library://radio/1" },
-  "Bose-Living Room": { "5": "library://radio/1" },
   ...all 10 speakers...
 },
 "invalidSourceFallback": { "uri": "library://radio/1" }
@@ -472,11 +532,12 @@ Key events:
 | Hardcoded speaker IPs | IPs change via DHCP; switched to name-based identification from Bose `/info` API |
 | `option: 1` (int) for play_media | MA requires string: `'replace'` not integer. Int caused "Internal server error" |
 | `uri` param for play_media | MA requires `media` not `uri`. Caused silent failure then "Internal server error" |
-| MA REST API for grouping | No grouping commands in MA REST API. Must use HA `media_player.join`/`unjoin` |
+| HA `media_player.join`/`unjoin` for MA grouping | Was the original approach. Replaced by MA `players/cmd/group`/`ungroup` which updates immediately (HA entity state lags by seconds). Also `media_player.join` only maps to MA's group (AirPlay) mechanism — not sync — so it doesn't work for WiiM. |
 | `_music_assistant` entity suffix | MA entities use numeric suffix (`_6`), not `_music_assistant`. Auto-derivation doesn't work |
 | `media_player.bose_bathroom_4` for Bathroom | Wrong — it's `_6`. HA returns 200 for join regardless, masking the error |
 | `upapf4e11ee0766b` for Bathroom queue | Wrong MAC-derived ID — actual MA queue is `upf0b5d19709fc` |
 | `upcc4b73fe2466` for Belkin queue | This queue disappeared from MA — correct Belkin queue is `upuuidff970010315bf140af4f0142ff970010` |
+| Belkin grouped via `speakerQueues["Bose-Bedroom"]` | Bose-Bedroom's own queue (`up04a316bee3e0`) has no AirPlay capability — `players/cmd/group` silently returns null. Must use Belkin's queue ID from `playRedirects.toQueue`. |
 | `members[0] === entity_id` leader detection | Breaks for Joshua/Rosemary where leader lists only members (not self). Use "has other known entities" + dedup instead |
 | `POST /presets` to reprogram preset 5 | Returns `CLIENT_XML_ERROR` for all formats tried. Preset writes appear to require the cloud protocol, not the local REST API. Presets can only be saved via physical long-press. |
 | `LOCAL_INTERNET_RADIO` JSON descriptor approach | Speaker accepts `/select` (returns 200), briefly shows the source in now-playing, but never fetches the JSON URL or the stream URL from it. The cloud was the resolver. Doesn't work post-shutdown. |
@@ -485,3 +546,7 @@ Key events:
 | WebSocket without User-Agent/Accept headers | libwebsockets on Bose speakers silently closes TCP connection if `User-Agent` and `Accept: */*` are absent. Standard WebSocket handshake headers alone are insufficient. |
 | boseWatcher: wait for STANDBY after INVALID_SOURCE | Speaker stays in INVALID_SOURCE indefinitely after cloud failure — never transitions to STANDBY. Abandoned in favour of polling for INVALID_SOURCE transition directly. |
 | boseWatcher: POWER key before MA play | Sent `POWER` key to clear stuck state; speaker didn't actually turn off but the sequence was unnecessary once WebSocket `nowSelectionUpdated` provided instant detection before cloud attempt. |
+| Stop→restart on MA group add | Originally stopped the queue, added the speaker, then restarted the URI. MA's AirPlay ring buffer supports late-join natively — no stop/restart needed. Removed. |
+| `doStopJoinRestart` function name | Renamed to `joinToGroup` — function never stopped or restarted anything after the live-join discovery. |
+| `removingMembers` as useMemo dependency | Caused the `groups` useMemo to re-run every time the spinner state changed, shifting card positions. Fixed by using a separate `removingMembersRef` managed imperatively. |
+| Syncing `removingMembersRef` from state in render | `removingMembersRef.current = removingMembers` caused the ref to clear in the same batched render as `maGroups` update, defeating the phantom guard. Ref is now managed only via direct `.add()`/`.delete()` mutations. |

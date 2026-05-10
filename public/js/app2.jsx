@@ -913,7 +913,7 @@ function SoundSettingsModal({ ip, speakerName, initialVolume, onVolumeChange, on
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, stopRestartEnabled, onToggleStopRestart }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, removingMembers, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, stopRestartEnabled, onToggleStopRestart }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
@@ -940,6 +940,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   const [upnpRepeatLocal, setUpnpRepeatLocal] = useState(master?.upnpRepeat || 'REPEAT_OFF');
   const [tvResetBusy, setTvResetBusy] = useState(false);
   const [showAllSpeakers, setShowAllSpeakers] = useState(false);
+  const [addingMembers, setAddingMembers] = useState(new Set());
   const timerRef = useRef(null);
   const adoptedRef = useRef(false);
   const pairingFreqRef = useRef(null);
@@ -1132,20 +1133,27 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         </div>
 
         {/* Checked speakers — in this group */}
-        {group.speakers.map(spk => (
-          <div key={spk.ip} className="px-4 py-2 flex items-start gap-2.5">
-            <input type="checkbox" checked
-              onChange={() => {
-                if (group.speakers.length <= 1 || group.phantomGroup) return;
-                if (spk.brand === 'wiim' || group.maMembers?.includes(spk.name)) {
-                  onMaGroupRemove(spk.name);
-                } else {
-                  onRemoveFromGroup(group.masterIp, spk.ip);
-                }
-              }}
-              disabled={group.speakers.length <= 1 || group.phantomGroup}
-              className="w-4 h-4 mt-0.5 accent-blue-500 flex-shrink-0 cursor-pointer disabled:opacity-30"
-            />
+        {group.speakers.map(spk => {
+          const isRemoving = removingMembers?.has(spk.name);
+          return (
+          <div key={spk.ip} className={'px-4 py-2 flex items-start gap-2.5 transition-opacity duration-150 ' + (isRemoving ? 'opacity-40' : '')}>
+            {isRemoving && group.speakers.length > 1
+              ? <div className="w-4 h-4 mt-0.5 flex-shrink-0 flex items-center justify-center">
+                  <div className="w-3.5 h-3.5 border-2 border-slate-500 border-t-blue-400 rounded-full animate-spin" />
+                </div>
+              : <input type="checkbox" checked
+                  onChange={() => {
+                    if (group.speakers.length <= 1 || group.phantomGroup) return;
+                    if (spk.brand === 'wiim' || group.maMembers?.includes(spk.name)) {
+                      onMaGroupRemove(spk.name);
+                    } else {
+                      onRemoveFromGroup(group.masterIp, spk.ip);
+                    }
+                  }}
+                  disabled={group.speakers.length <= 1 || isRemoving || group.phantomGroup}
+                  className="w-4 h-4 mt-0.5 accent-blue-500 flex-shrink-0 cursor-pointer disabled:opacity-30"
+                />
+            }
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-white text-sm font-semibold truncate">{spk.name}</span>
@@ -1193,7 +1201,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
               )}
             </div>
           </div>
-        ))}
+        );})}
 
         {/* Unchecked speakers — not in this group, sorted by pairing frequency with this leader */}
         {otherSpeakers?.length > 0 && (() => {
@@ -1215,22 +1223,31 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                   : !src || src === 'STANDBY' || src === 'INVALID_SOURCE' ? ''
                   : src === 'AIRPLAY' ? 'AirPlay'
                   : src === 'PRODUCT' ? 'In Use · TV' : src;
+                const isAdding = addingMembers.has(spk.ip);
                 return (
-                  <div key={spk.ip} className="px-4 py-1.5 flex items-center gap-2.5">
-                    <input type="checkbox" checked={isSelected || false}
-                      onChange={async () => {
-                        const willAdd = !isSelected;
-                        onTogglePendingMember(group.masterIp, spk.ip);
-                        if (willAdd && !isStandby) {
-                          recordPairing(master?.name, spk.name);
-                          const err = await onJoinNow(group.masterIp, spk.ip);
-                          if (err) setFavStatus('Join failed: ' + err);
-                        }
-                      }}
-                      className="w-4 h-4 accent-blue-500 flex-shrink-0 cursor-pointer"
-                    />
-                    <span className={'text-sm truncate flex-1 ' + (inAnotherGroup ? 'text-slate-500' : 'text-slate-300')}>{spk.name}</span>
-                    {srcLabel && (
+                  <div key={spk.ip} className={'px-4 py-1.5 flex items-center gap-2.5 transition-opacity duration-150 ' + (isAdding ? 'opacity-40' : '')}>
+                    {isAdding
+                      ? <div className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
+                          <div className="w-3.5 h-3.5 border-2 border-slate-500 border-t-blue-400 rounded-full animate-spin" />
+                        </div>
+                      : <input type="checkbox" checked={isSelected || false}
+                          onChange={async () => {
+                            const willAdd = !isSelected;
+                            if (!willAdd || isStandby) {
+                              onTogglePendingMember(group.masterIp, spk.ip);
+                              return;
+                            }
+                            setAddingMembers(prev => new Set([...prev, spk.ip]));
+                            const err = await onJoinNow(group.masterIp, spk.ip);
+                            recordPairing(master?.name, spk.name);
+                            setAddingMembers(prev => { const s = new Set(prev); s.delete(spk.ip); return s; });
+                            if (err) setFavStatus('Join failed: ' + err);
+                          }}
+                          className="w-4 h-4 accent-blue-500 flex-shrink-0 cursor-pointer"
+                        />
+                    }
+                    <span className={'text-sm truncate flex-1 ' + (isAdding ? 'text-slate-500' : inAnotherGroup ? 'text-slate-500' : 'text-slate-300')}>{spk.name}</span>
+                    {srcLabel && !isAdding && (
                       <span className={'text-xs flex-shrink-0 ' + (isActive ? 'text-green-400' : 'text-slate-600')}>{srcLabel}</span>
                     )}
                   </div>
@@ -1423,6 +1440,8 @@ function AllSpeakersView() {
   const [maTrackData, setMaTrackData] = useState({}); // speakerName → { track, artist, art }
   const [tvState, setTvState] = useState(null);
   const [pendingGroups, setPendingGroups] = useState({});
+  const [removingMembers, setRemovingMembers] = useState(new Set());
+  const removingMembersRef = useRef(new Set());
   const [showWholeHouse, setShowWholeHouse] = useState(false);
   const [wiimAlerts, setWiimAlerts] = useState([]); // [{ name, oldIp, newIp }]
   const [stopRestartByZone, setStopRestartByZone] = useState(() => {
@@ -1466,11 +1485,10 @@ function AllSpeakersView() {
     setWiimAlerts(prev => prev.filter(a => a.name !== alert.name));
   };
 
-  const fetchMaGroups = () => {
+  const fetchMaGroups = () =>
     fetch('/ha/group-state').then(r => r.json()).then(d => {
       if (d.ok) setMaGroups(d.groups || []);
     }).catch(() => {});
-  };
 
   const pollAll = async (list = speakers) => {
     const speakerList = list.length ? list : SPEAKERS;
@@ -1626,6 +1644,7 @@ function AllSpeakersView() {
     const trackBuckets = {};
     merged.forEach(g => {
       if (g.speakers.length !== 1) return;
+      if (removingMembersRef.current.has(g.speakers[0].name)) return; // mid-removal: don't re-absorb into phantom
       const np = g.speakers[0].nowPlaying;
       if (!np || np.source !== 'AIRPLAY' || !np.track || !np.artist) return;
       const key = `${np.artist}|${np.track}`;
@@ -1918,17 +1937,23 @@ function AllSpeakersView() {
   };
 
   const onMaGroupRemove = (speakerName) => {
-    const memberIp = speakers.find(s => s.name === speakerName)?.ip;
-    if (memberIp) setPendingGroups(prev => {
-      const next = {};
-      for (const [k, v] of Object.entries(prev)) { const s = new Set(v); s.delete(memberIp); if (s.size) next[k] = s; }
-      return next;
-    });
-    fetch('/ha/group-remove', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speakerName }),
-    }).then(() => setTimeout(() => { fetchMaGroups(); pollAll(); }, 1000));
+    // Populate phantom guard and spinner synchronously in the event batch
+    removingMembersRef.current.add(speakerName);
+    setRemovingMembers(prev => new Set([...prev, speakerName]));
+    (async () => {
+      await fetch('/ha/group-remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakerName }),
+      });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await fetchMaGroups();
+      // Keep removingMembers active through pollAll — standalone card stays grey until
+      // speakerData is fresh and the card has settled in its final sort position
+      await pollAll();
+      removingMembersRef.current.delete(speakerName);
+      setRemovingMembers(prev => { const s = new Set(prev); s.delete(speakerName); return s; });
+    })();
   };
 
   const adoptPhantomGroup = async (group) => {
@@ -1953,7 +1978,7 @@ function AllSpeakersView() {
     }).then(() => setTimeout(pollAll, 1000));
   };
 
-  const doStopJoinRestart = async (leaderIp, memberIp, leaderName, memberName, queueId) => {
+  const joinToGroup = async (leaderIp, memberIp, leaderName, memberName, queueId) => {
     const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
     // Dissolve native WiiM multiroom first so WiiM responds to AirPlay grouping correctly.
@@ -1966,18 +1991,20 @@ function AllSpeakersView() {
     try {
       const res = await post('/ha/group-include', { masterName: leaderName, speakerNames: [memberName] });
       const d = await res.json();
-      console.log('[doStopJoinRestart] group-include result:', JSON.stringify(d));
-      if (!d.ok) console.error('[doStopJoinRestart] group-include failed:', d.error);
-    } catch (e) { console.warn('[doStopJoinRestart] error:', e); }
+      console.log('[joinToGroup] group-include result:', JSON.stringify(d));
+      if (!d.ok) console.error('[joinToGroup] group-include failed:', d.error);
+    } catch (e) { console.warn('[joinToGroup] error:', e); }
 
     // After join, verify MA group state
     try {
       const r = await fetch('/ha/ma-players');
       const d = await r.json();
-      console.log('[doStopJoinRestart] MA players after join:', JSON.stringify(d.players));
+      console.log('[joinToGroup] MA players after join:', JSON.stringify(d.players));
     } catch {}
 
-    setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await fetchMaGroups();
+    await pollAll();
   };
 
   const joinSpeakerNow = async (leaderIp, memberIp) => {
@@ -1992,7 +2019,7 @@ function AllSpeakersView() {
     // Native UPNP (direct NAS) still uses Bose zone grouping.
     if (hasMAEntity && memberName && leaderSource !== 'UPNP') {
       const queueId = haConfig?.speakerQueues?.[leaderName];
-      return await doStopJoinRestart(leaderIp, memberIp, leaderName, memberName, queueId)
+      return await joinToGroup(leaderIp, memberIp, leaderName, memberName, queueId)
         .then(() => null)
         .catch(e => e.message);
     } else if (leaderName && !hasMAEntity) {
@@ -2138,14 +2165,14 @@ function AllSpeakersView() {
       <div className="max-w-2xl mx-auto">
 
         {/* Header */}
-        <div className="flex items-center justify-between mb-5">
+        <div className="flex items-start justify-between mb-5">
           <div>
             <BoomBoxIcon size={80}/>
             <p className="text-slate-500 text-xs mt-0.5">
               {lastUpdated ? 'Updated ' + lastUpdated.toLocaleTimeString() : 'Scanning speakers... (' + Object.keys(speakerData).length + '/' + speakers.length + ')'}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 justify-end ml-4">
             {haConfig && (() => {
               const haUrl = haConfig.haUrl || 'http://homeassistant:8123';
               const maUrl = haUrl.replace(':8123', ':8095');
@@ -2220,6 +2247,7 @@ function AllSpeakersView() {
                 onPlayNasFolder={playNasFolder}
                 onMaStop={onMaStop}
                 onMaGroupRemove={onMaGroupRemove}
+                removingMembers={removingMembers}
                 haConfig={haConfig}
                 onPlayFavorite={playFavorite}
                 maTrack={maTrackData[master?.name]}

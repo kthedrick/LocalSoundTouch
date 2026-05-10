@@ -591,7 +591,11 @@ async function handleHa(req, res) {
       // MA's AirPlay provider supports late-join via ring buffer — no stop needed.
       const results = [];
       for (const name of names) {
-        const memberId = nameToQueue[name];
+        let memberId = nameToQueue[name];
+        // Speakers with a playRedirects entry (e.g. Bose-Bedroom → Belkin AirPlay adapter)
+        // must group the redirect target, not the Bose itself (which has no AirPlay).
+        const redirect = (cfg.playRedirects || []).find(r => r.speakerName === name && r.toQueue);
+        if (redirect) memberId = redirect.toQueue;
         if (!memberId) {
           console.warn('[ha/group-include] no player ID for %s, skipping', name);
           continue;
@@ -627,7 +631,9 @@ async function handleHa(req, res) {
   if (url === '/ha/group-remove' && req.method === 'POST') {
     const body = await readBody(req);
     const cfg = getConfig();
-    const playerId = cfg.speakerQueues?.[body.speakerName];
+    let playerId = cfg.speakerQueues?.[body.speakerName];
+    const redirect = (cfg.playRedirects || []).find(r => r.speakerName === body.speakerName && r.toQueue);
+    if (redirect) playerId = redirect.toQueue;
     if (!playerId) {
       err(res, `No MA player ID for: ${body.speakerName}`);
       return;
@@ -661,6 +667,10 @@ async function handleHa(req, res) {
       for (const [name, queueId] of Object.entries(cfg.speakerQueues || {})) {
         nameToQueue[name] = queueId;
         queueToName[queueId] = name;
+      }
+      // playRedirects targets (e.g. Belkin adapter for Bose-Bedroom) must resolve to speakerName
+      for (const r of (cfg.playRedirects || [])) {
+        if (r.toQueue && r.speakerName) queueToName[r.toQueue] = r.speakerName;
       }
 
       // Fetch HA states and MA players in parallel

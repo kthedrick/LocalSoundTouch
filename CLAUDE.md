@@ -80,7 +80,7 @@ The `/ha/group-state` handler uses: "any entity that has OTHER known entities in
 - **MA library browser ("Music Assistant" section)**: navigable tree — Radio, Pandora, Apple Music, Filesystem, RadioBrowser providers
 - **Apple Music via MA**: browse Artists → Albums → Tracks; play at album or track level via AirPlay
 - **NAS via MA**: "Filesystem (remote share)" in MA browser redirects to working FTP NAS browser; play at folder or track level routes through MA AirPlay using filesystem URIs (`filesystem_smb--<id>://folder/...`)
-- **Add speaker to group (stop→join→restart)**: immediately stops MA, joins speaker, restarts station. Station URI fetched from in-memory map first, falls back to `/ha/queue-uri` (survives server restart). If URI is unavailable, joins without stopping (music preserved).
+- **Add speaker to group (live join)**: calls `/ha/group-include` directly while playing — MA AirPlay ring buffer handles late-join. No stop/restart needed.
 - **Release to TV**: stops + clears MA queue so HA doesn't auto-restart
 - **Power button MA clear**: when powering off an AIRPLAY speaker, auto-calls stop+clear
 - **Skip/Prev via MA**: when source=AIRPLAY, next/prev routes through `/ha/next` and `/ha/prev`
@@ -151,13 +151,13 @@ Folder name derivation: MA returns empty `name` for provider sub-folders. We der
 
 ---
 
-## Adding a Speaker to an Active MA Group (stop→join→restart)
+## Adding a Speaker to an Active MA Group (live join)
 
 Flow in `joinSpeakerNow` / `doStopJoinRestart` (app2.jsx):
-1. Fetch station URI from `/ha/station-uri` (in-memory map) → fallback to `/ha/queue-uri` (live MA queue)
-2. If URI found: stop queue → join via `/ha/group-include` → wait 500ms → restart via `/ha/play`
-3. If URI null: just join without stopping (music preserved, new speaker joins mid-stream)
-4. "Wait for track end" approach was removed — Pandora doesn't report track duration via MA REST API
+1. Optionally dissolve native WiiM multiroom first (so WiiM responds to AirPlay grouping)
+2. POST `/ha/group-include` with `{ masterName, speakerNames: [memberName] }`
+3. MA AirPlay ring buffer handles the late-join — no stop or restart needed
+4. Poll MA group state 1.5s later to update UI
 
 ---
 
@@ -194,7 +194,7 @@ MA has a `music/search` command (`{ search_query, media_types, limit }`) that se
 ✅ **Done:** Power button on AIRPLAY speakers calls MA stop+clear.
 
 ### MA Speaker Grouping UI
-✅ **Done:** Include section shows other speakers; clicking adds to MA AirPlay group via stop→join→restart.
+✅ **Done:** Include section shows other speakers; clicking adds to MA AirPlay group via live join (no stop/restart).
 
 ### Server-side WebSocket Queue (Polish)
 Replace 3s `GetTransportInfo` polling for queue advancement with a WebSocket subscription to `ws://<speakerIp>:8080`. Speaker pushes `nowPlayingUpdated` events — when `playStatus` hits `STOP_STATE` with source=UPnP, advance the queue immediately. Requires implementing WebSocket client handshake in Node.js `net` module (~50 lines, no npm).
