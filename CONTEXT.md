@@ -79,9 +79,12 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 | `GET /ha/queues` | Lists all MA queues (discovery/debug) |
 | `GET /ha/ma-players` | Returns MA player states including `synced_to`, `state`, `can_group_with` |
 | `GET /ha/group-state` | Returns active MA sync groups. Primary source: MA `players/all` `synced_to` field (immediate). Supplementary: HA entity `group_members` (catches WiiM). |
-| `GET /ha/queue-now-playing?queueId=` | Returns track/artist/art/duration/position from MA queue |
+| `GET /ha/queue-now-playing?queueId=` | Returns track/artist/art/duration/position from MA queue. For radio/Pandora: duration falls back to `stream_metadata.duration` (item.duration is null for radio); position returns 0 (queue.elapsed_time is cumulative queue time, not per-track — let client timer handle it). |
 | `GET /ha/raw-states` | Dumps raw HA entity states for all speakerEntities (debug) |
 | `GET /ha/ma-entities` | Lists all non-STP media_player entities from HA (debug/discovery) |
+| `GET /ha/pandora-playlists` | Returns all Pandora→Apple Music playlists from pandoraPlaylists.json |
+| `POST /ha/pandora-playlists` | Overwrites playlist data (used for one-time backfill/restore) |
+| `POST /ha/pandora-play-playlist` | Play a collected playlist `{ stationName, queueId }`. Uses MA playlist if found, otherwise shuffles and enqueues Apple Music URIs directly. |
 | `POST /ha/stop` | Stop a queue `{ queueId }` |
 | `POST /ha/pause` | Pause a queue |
 | `POST /ha/resume` | Resume a queue |
@@ -114,6 +117,34 @@ Key sections:
 - `players/cmd/ungroup` args: `{ player_id }` — removes player from its current group.
 - Queue/player IDs: `up` + MAC fragment for Bose/UPnP; `syncgroup_*` for AirPlay sync groups; `upuuid*` for UUID-based AirPlay devices (Belkin)
 - Grouping IS available via MA REST API: `players/cmd/group` and `players/cmd/ungroup`. HA `media_player.join`/`unjoin` is NOT used for grouping (it maps to MA's group mechanism, not sync — doesn't work for WiiM which uses `synced_to`).
+
+### Pandora → Apple Music Tracker (`pandoraTracker.js`)
+
+Background module started in `main.js`. Polls all MA queues every 5s via `player_queues/all`, auto-detects Pandora streams by `streamdetails.provider === 'pandora'`, and collects tracks listened to ≥70% through (or ≥60s, to handle mid-track join after restart).
+
+**Completion detection:** `queue.elapsed_time` is cumulative queue time, not per-track position. The tracker records `elapsed_time` when a new track appears (`queueElapsedAtStart`) and computes `timeSpent = lastQueueElapsed - queueElapsedAtStart`. Comparison triggers when the track key (artist+title) changes.
+
+**Apple Music lookup:** On completion, searches MA `music/search` for the track (artist+title, `media_types: ['track']`, limit 5). Finds the result with a `provider_mappings` entry for `apple_music`. Gets the `uri` (e.g. `library://track/123`).
+
+**MA playlist sync:** Searches MA `music/search` for a playlist matching the station name (`media_types: ['playlist']`, limit 20). Tries exact match first, then strips trailing " Radio" (e.g. "Radiohead Radio" → "Radiohead"). If found, adds the track via `music/playlists/add_playlist_tracks` with `{ db_playlist_id: "26", uris: [...] }`. Playlists must be **created manually in the MA UI** — MA REST API has no create endpoint.
+
+**Persistence:** Data stored at `/data/pandoraPlaylists.json` (HA add-on persistent storage, survives Docker rebuilds). Falls back to `__dirname` for local dev. Structure:
+```json
+{
+  "Radiohead Radio": {
+    "maPlaylistId": "26",
+    "tracks": [{ "artist", "title", "album", "appleUri", "addedAt" }]
+  }
+}
+```
+`maPlaylistId`: `null` = not yet looked up; `false` = looked up but not found; `"26"` = found.
+
+**UI:** `public/playlists.html` at `/playlists` shows all collected stations with track lists and MA-sync badge.
+
+**MA API commands confirmed working:**
+- `music/search` with `media_types: ['playlist']` — returns playlists with `uri` like `library://playlist/26`
+- `music/playlists/add_playlist_tracks` with `{ db_playlist_id: "26", uris: ["library://track/..."] }` — returns a background task JSON, completes asynchronously
+- `music/search` with `media_types: ['track']` — returns tracks across all providers including Apple Music
 
 ### `/ha/group-state` — Group Detection Logic
 
@@ -149,7 +180,10 @@ The code uses "any entity that has OTHER known entities in its group_members is 
 - **Release to TV:** Shown only on speakers in `haConfig.releaseToTV` (Sunroom 300). Stops+clears MA queue so HA doesn't auto-restart when soundbar switches to TV.
 - **Per-speaker power button (⏻):** Shown in the speaker header row of each zone card.
 - **Sort order:** Active multi-speaker groups first, then active solo, then idle. Within each tier, sorted by SPEAKERS constant order (Sunroom 300 first).
-- **MA track metadata:** When source=AIRPLAY or source=AUX (with redirect), polls `/ha/queue-now-playing` for track/artist/art/duration/position. Progress bar and timer use MA data when Bose reports 0.
+- **MA track metadata:** When source=AIRPLAY or source=AUX (with redirect), polls `/ha/queue-now-playing` for track/artist/art/duration/position. For MA sources, `maTrack.track/artist/art` are preferred over `np.track/artist/art` (Bose's AirPlay metadata carries station-level info, not per-track). Progress bar and timer use MA data when Bose reports 0.
+- **Progress timer for Pandora/radio:** `effectiveDuration` uses `stream_metadata.duration` (not `item.duration`, which is null for radio). `effectivePosition` starts at 0 on each new track (MA's `elapsed_time` is cumulative queue time — unusable as per-track position). Client timer ticks forward from 0 and resets via `useEffect([effectiveTrack, ...])` when `maTrack.track` changes.
+- **Source-based grouping routing:** MA grouping (`group-include`/`group-remove`) is only used when leader source = AIRPLAY. All other sources (BLUETOOTH, UPNP, AUX, etc.) use native Bose zone API (`/setZone`, `/removeZoneSlave`).
+- **Auto group transition:** When a group leader's source crosses the AIRPLAY/native boundary, the UI automatically transitions the group. AIRPLAY→native: unjoins MA members, then rebuilds native Bose zone. Native→AIRPLAY: dissolves Bose zone, then rejoins via MA. 2s debounce prevents false triggers during transient INVALID_SOURCE states. Uses `prevSourceRef` + `speakerDataRef` (ref kept in sync via no-dep useEffect) to safely access fresh state inside setTimeout callbacks.
 - **groupSideEffects:** After any MA group change, server checks rules and flips HA switches. Currently: turns on `switch.living_room_bass` when Sunroom 300 + Living Room are grouped (bass module is physically wired to Sunroom output).
 - **playRedirects:** Intercepts `/ha/play` by matching `fromQueue`. For Bedroom: switches Bose-Bedroom to AUX1 and plays on Belkin AirPlay queue instead. Also used by `group-include` and `group-remove` to find the correct MA player ID.
 
@@ -261,6 +295,9 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 ---
 
 ## Future TODOs
+
+### Pandora timer reset on track change — UNRESOLVED
+The timer does not reset to 0 when a new Pandora track starts (confirmed May 2026). The fix (preferring `maTrack.track` over `np.track` for MA sources so `effectiveTrack` changes per-track) was deployed but did not work. Root cause still unknown — either `maTrack.track` is not changing between tracks, or the useEffect dependency isn't firing as expected. Next step: log `maTrack.track` on each render or check `/ha/queue-now-playing` manually between tracks to see if the title actually changes.
 
 ### Group add/remove delays — check if removable
 After `players/cmd/group`/`ungroup`, the code waits 100ms before calling `fetchMaGroups`. This was reduced from 1000–1500ms (trial-and-error from when group-state relied on slow HA entity attributes). With MA `synced_to` as primary source (immediate), these delays may be removable entirely. Try 0ms if grouping has been reliable.
@@ -550,3 +587,7 @@ Key events:
 | `doStopJoinRestart` function name | Renamed to `joinToGroup` — function never stopped or restarted anything after the live-join discovery. |
 | `removingMembers` as useMemo dependency | Caused the `groups` useMemo to re-run every time the spinner state changed, shifting card positions. Fixed by using a separate `removingMembersRef` managed imperatively. |
 | Syncing `removingMembersRef` from state in render | `removingMembersRef.current = removingMembers` caused the ref to clear in the same batched render as `maGroups` update, defeating the phantom guard. Ref is now managed only via direct `.add()`/`.delete()` mutations. |
+| `music/playlists/create` for auto-creating MA playlists | MA REST API has no create endpoint. Returns null/error for all formats tried. Playlists must be created manually in MA UI, then found by name via `music/search`. |
+| `music/playlists/add_playlist_item` with `item_id` | Wrong command and wrong arg name. Correct: `music/playlists/add_playlist_tracks` with `db_playlist_id` (string, e.g. `"26"`). |
+| `queue.elapsed_time` as per-track position for display | It's cumulative queue time (total time the station/queue has been playing), not position within the current track. For Pandora radio, Bose's AirPlay position is always 0 (radio not seekable), and falling back to `elapsed_time` showed "total time since station started." Fixed: return 0 for radio sources; client timer handles per-track counting. |
+| `np.track / np.art` for MA source display | For AIRPLAY, Bose receives station-level AirPlay metadata from MA (station art, static station name), not per-track. For Pandora specifically: art was stuck on station art, track name was static. Fixed: prefer `maTrack.track/artist/art` (from `stream_metadata`) for MA sources. |

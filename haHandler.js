@@ -482,15 +482,18 @@ async function handleHa(req, res) {
       const mediaType = item?.media_item?.media_type || item?.streamdetails?.media_type || null;
       const stationName = mediaType === 'radio' ? (item?.media_item?.name || item?.name || null) : null;
       const provider = item?.streamdetails?.provider || null;
+      // For radio/Pandora: item.duration is null; real duration is in stream_metadata.
+      // elapsed_time is cumulative queue time (not per-track position) — unusable for radio.
+      const isRadio = mediaType === 'radio' || provider === 'pandora';
       ok(res, {
         track:    meta?.title  || item?.name || null,
         artist:   meta?.artist || null,
         album:    meta?.album  || null,
         art:      meta?.image_url || item?.image?.path || null,
         uri:      item?.media_item?.uri || null,
-        duration: item?.duration || 0,
-        position: queue?.elapsed_time || 0,
-        positionUpdatedAt: queue?.elapsed_time_last_updated || null,
+        duration: item?.duration || (isRadio ? (meta?.duration || 0) : 0),
+        position: isRadio ? 0 : (queue?.elapsed_time || 0),
+        positionUpdatedAt: isRadio ? null : (queue?.elapsed_time_last_updated || null),
         mediaType,
         stationName,
         provider,

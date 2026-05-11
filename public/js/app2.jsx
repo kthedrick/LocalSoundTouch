@@ -919,9 +919,9 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
   const isAirplay  = np?.source === 'AIRPLAY';
   const isMASource = isAirplay || (np?.source === 'AUX' && !!maTrack);
-  const effectiveArt      = np?.art    || maTrack?.art    || null;
-  const effectiveTrack    = np?.track  || maTrack?.track  || null;
-  const effectiveArtist   = np?.artist || maTrack?.artist || null;
+  const effectiveArt      = (isMASource ? maTrack?.art : null) || np?.art || maTrack?.art || null;
+  const effectiveTrack    = (isMASource ? maTrack?.track  : null) || np?.track  || maTrack?.track  || null;
+  const effectiveArtist   = (isMASource ? maTrack?.artist : null) || np?.artist || maTrack?.artist || null;
   const effectiveDuration = (np?.duration > 0 ? np.duration : null) ?? (maTrack?.duration || 0);
   const maPosition = maTrack?.positionUpdatedAt
     ? Math.min((maTrack.position || 0) + (Date.now() / 1000 - maTrack.positionUpdatedAt), maTrack.duration || 0)
