@@ -1,7 +1,8 @@
 // HTTP handler for /ha/* routes — Music Assistant integration
 
 const http = require('http');
-const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig } = require('./maClient');
+const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig, maPost } = require('./maClient');
+const pandoraTracker = require('./pandoraTracker');
 
 // Track the station URI most recently played on each queue (for stop→rejoin→restart)
 const activeStationUris = {};
@@ -434,6 +435,9 @@ async function handleHa(req, res) {
 
       const result = await playMedia(queueId, uri);
       activeStationUris[queueId] = uri;
+      if (uri && uri.startsWith('pandora://')) {
+        pandoraTracker.setActiveStation(queueId, body.name || uri);
+      }
       console.log('[ha/play] queueId=%s uri=%s result=%j', queueId, uri, result);
       ok(res, { result });
     } catch (e) {
@@ -491,6 +495,56 @@ async function handleHa(req, res) {
         stationName,
         provider,
       });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/pandora-playlists — overwrite playlist data (used for backfill/restore)
+  if (url === '/ha/pandora-playlists' && req.method === 'POST') {
+    const body = await readBody(req);
+    pandoraTracker.saveData(body);
+    ok(res, { written: Object.keys(body).length });
+    return;
+  }
+
+  // GET /ha/pandora-playlists — return all Pandora→Apple Music station playlists
+  if (url === '/ha/pandora-playlists' && req.method === 'GET') {
+    const data = pandoraTracker.loadData();
+    const playlists = Object.entries(data).map(([station, v]) => ({
+      station,
+      trackCount: v.tracks.length,
+      maPlaylistId: v.maPlaylistId || null,
+      tracks: v.tracks || [],
+    }));
+    ok(res, { playlists });
+    return;
+  }
+
+  // POST /ha/pandora-play-playlist — play a Pandora station playlist shuffled { stationName, queueId }
+  if (url === '/ha/pandora-play-playlist' && req.method === 'POST') {
+    const body = await readBody(req);
+    const { stationName, queueId } = body;
+    const data = pandoraTracker.loadData();
+    const station = data[stationName];
+    if (!station || !station.tracks.length) {
+      err(res, 'No tracks collected for station: ' + stationName);
+      return;
+    }
+    try {
+      if (station.maPlaylistId) {
+        // Play the MA playlist directly (shuffle is handled by MA)
+        await playMedia(queueId, `library://playlist/${station.maPlaylistId}`);
+        try { await maPost('player_queues/shuffle', { queue_id: queueId, shuffle: true }); } catch {}
+      } else {
+        // Fallback: shuffle tracks in Node.js and enqueue them one by one
+        const tracks = [...station.tracks].filter(t => t.appleUri).sort(() => Math.random() - 0.5);
+        if (!tracks.length) { err(res, 'No Apple Music tracks found for station: ' + stationName); return; }
+        await playMedia(queueId, tracks[0].appleUri);
+        for (let i = 1; i < tracks.length; i++) {
+          await maPost('player_queues/play_media', { queue_id: queueId, media: tracks[i].appleUri, option: 'add' });
+        }
+      }
+      ok(res, {});
     } catch (e) { err(res, e.message); }
     return;
   }

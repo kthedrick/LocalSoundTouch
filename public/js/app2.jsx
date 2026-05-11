@@ -160,7 +160,7 @@ function MABrowserModal({ speakerName, queueId, onClose, onBeforePlay, onFilesys
       const res = await fetch('/ha/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ queueId, uri: item.uri }),
+        body: JSON.stringify({ queueId, uri: item.uri, name: item.name }),
       });
       const d = await res.json();
       if (d.ok) { setStatus(item.name + ' started'); setTimeout(onClose, 800); }
@@ -936,6 +936,8 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   const [artModal, setArtModal] = useState(false);
   const [favStatus, setFavStatus] = useState(null);
   const [radioBrowser, setRadioBrowser] = useState(false);
+  const [pandoraPlaylists, setPandoraPlaylists] = useState([]);
+  const [pandoraPlayStatus, setPandoraPlayStatus] = useState(null);
   const [soundSettingsSpk, setSoundSettingsSpk] = useState(null);
   const [upnpRepeatLocal, setUpnpRepeatLocal] = useState(master?.upnpRepeat || 'REPEAT_OFF');
   const [tvResetBusy, setTvResetBusy] = useState(false);
@@ -987,6 +989,10 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   };
 
   useEffect(() => { setUpnpRepeatLocal(master?.upnpRepeat || 'REPEAT_OFF'); }, [master?.upnpRepeat]);
+
+  useEffect(() => {
+    fetch('/ha/pandora-playlists').then(r => r.json()).then(d => { if (d.ok) setPandoraPlaylists(d.playlists || []); }).catch(() => {});
+  }, []);
 
   const isUpnp = np?.source === 'UPNP' || np?.source === 'LOCAL_INTERNET_RADIO';
   const repeatMode = isUpnp ? upnpRepeatLocal : (np?.repeatSetting || 'REPEAT_OFF');
@@ -1291,6 +1297,44 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         {favStatus && <p className="text-indigo-300 text-xs mt-1.5 italic">{favStatus}</p>}
       </div>
 
+      {/* Pandora Playlists */}
+      {pandoraPlaylists.length > 0 && (
+        <div className="px-4 py-3 border-t border-slate-700/60">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider">Local Playlists</h3>
+            <a href="/playlists.html" target="_blank" className="text-slate-500 hover:text-slate-300 text-xs transition">view all →</a>
+          </div>
+          <div className="flex flex-col gap-1">
+            {pandoraPlaylists.map(pl => (
+              <div key={pl.station} className="flex items-center justify-between gap-2">
+                <span className="text-slate-300 text-xs truncate flex-1">{pl.station} ({pl.trackCount} track{pl.trackCount !== 1 ? 's' : ''})</span>
+                <button
+                  onClick={async () => {
+                    const queueId = haConfig?.speakerQueues?.[master?.name] || haConfig?.queues?.airplayGroup;
+                    setPandoraPlayStatus('Starting ' + pl.station + '...');
+                    await maybeAdopt();
+                    await onEstablishGroup(group.masterIp);
+                    try {
+                      const r = await fetch('/ha/pandora-play-playlist', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ stationName: pl.station, queueId }),
+                      });
+                      const d = await r.json();
+                      setPandoraPlayStatus(d.ok ? pl.station + ' started' : 'Error: ' + (d.error || 'unknown'));
+                    } catch (e) { setPandoraPlayStatus('Error: ' + e.message); }
+                    setTimeout(() => setPandoraPlayStatus(null), 5000);
+                  }}
+                  className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-medium transition flex-shrink-0">
+                  ▶ Play
+                </button>
+              </div>
+            ))}
+            {pandoraPlayStatus && <p className="text-indigo-300 text-xs mt-1 italic">{pandoraPlayStatus}</p>}
+          </div>
+        </div>
+      )}
+
       {/* Home */}
       <div className="px-4 py-3 border-t border-slate-700/60">
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Home</h3>
@@ -1450,6 +1494,9 @@ function AllSpeakersView() {
   const wiimIpOverrides = useRef({}); // speakerName → override IP (persists across fetchSpeakers calls)
   const volumeTimers = useRef({});
   const deviceIds = useRef({});
+  const prevSourceRef = useRef({});          // ip → last confirmed source (for transition detection)
+  const speakerDataRef = useRef({});         // always-fresh speakerData for use inside setTimeout callbacks
+  const autoTransitionTimers = useRef({});   // ip → debounce timer handle
 
   const fetchSpeakers = async () => {
     try {
@@ -1564,6 +1611,49 @@ function AllSpeakersView() {
         .catch(() => {});
     });
   }, [speakerData, haConfig]);
+
+  // Keep speakerDataRef current so setTimeout callbacks always see fresh data
+  useEffect(() => { speakerDataRef.current = speakerData; });
+
+  // Auto-transition groups when a leader's source crosses the AirPlay/native boundary.
+  // Bose zone → AIRPLAY: dissolve zone, rejoin via MA. AIRPLAY → native: remove MA members, rebuild zone.
+  useEffect(() => {
+    if (!haConfig) return;
+    for (const [ip, data] of Object.entries(speakerData)) {
+      const cur = data?.nowPlaying?.source;
+      if (!cur || cur === 'INVALID_SOURCE') continue;
+      const prev = prevSourceRef.current[ip];
+      prevSourceRef.current[ip] = cur;
+      if (!prev || cur === prev) continue;
+
+      const wasAirplay    = prev === 'AIRPLAY';
+      const isNowAirplay  = cur  === 'AIRPLAY';
+      if (wasAirplay === isNowAirplay) continue; // same grouping category, no transition needed
+
+      const group = groups.find(g => g.masterIp === ip && g.speakers.length > 1);
+      if (!group) continue;
+
+      const leaderName = data.name;
+      const memberIps  = group.speakers.filter(s => s.ip !== ip).map(s => s.ip);
+      const maMembers  = group.maMembers || [];
+      const queueId    = haConfig.speakerQueues?.[leaderName];
+      console.log(`[autoTransition] ${leaderName}: ${prev} → ${cur} (${memberIps.length} members)`);
+
+      clearTimeout(autoTransitionTimers.current[ip]);
+      autoTransitionTimers.current[ip] = setTimeout(async () => {
+        // Abort if source changed again during debounce
+        if (speakerDataRef.current[ip]?.nowPlaying?.source !== cur) {
+          console.log(`[autoTransition] ${leaderName}: source changed again, aborting`);
+          return;
+        }
+        if (isNowAirplay) {
+          await autoTransitionToMA(ip, leaderName, memberIps, queueId);
+        } else {
+          await autoTransitionToBose(ip, leaderName, maMembers);
+        }
+      }, 2000);
+    }
+  }, [speakerData, groups, haConfig]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -1967,6 +2057,54 @@ function AllSpeakersView() {
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1500);
   };
 
+  // Dissolve Bose zone then add all members to MA AirPlay group (native → AirPlay transition)
+  const autoTransitionToMA = async (leaderIp, leaderName, memberIps, queueId) => {
+    console.log(`[autoTransition] ${leaderName}: dissolving Bose zone, joining ${memberIps.length} members via MA`);
+    const masterDeviceId = await getDeviceId(leaderIp).catch(() => null);
+    if (masterDeviceId) {
+      for (const memberIp of memberIps) {
+        const devId = await getDeviceId(memberIp).catch(() => null);
+        if (!devId) continue;
+        const xml = `<?xml version="1.0" encoding="UTF-8"?><zone master="${masterDeviceId}"><member ipaddress="${memberIp}">${devId}</member></zone>`;
+        await apiPost(leaderIp, '/removeZoneSlave', xml).catch(() => {});
+      }
+    }
+    await new Promise(r => setTimeout(r, 500));
+    for (const memberIp of memberIps) {
+      const memberName = speakerDataRef.current[memberIp]?.name;
+      if (!memberName) continue;
+      await joinToGroup(leaderIp, memberIp, leaderName, memberName, queueId).catch(() => {});
+    }
+  };
+
+  // Remove members from MA group then rebuild Bose zone (AirPlay → native transition)
+  const autoTransitionToBose = async (leaderIp, leaderName, maMembers) => {
+    console.log(`[autoTransition] ${leaderName}: removing MA group, rebuilding Bose zone for ${maMembers.length} members`);
+    for (const memberName of maMembers) {
+      await fetch('/ha/group-remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakerName: memberName }),
+      }).catch(() => {});
+    }
+    await new Promise(r => setTimeout(r, 500));
+    const memberIps = maMembers
+      .map(name => Object.values(speakerDataRef.current).find(s => s.name === name)?.ip)
+      .filter(Boolean);
+    if (!memberIps.length) { setTimeout(() => { fetchMaGroups(); pollAll(); }, 500); return; }
+    const masterDeviceId = await getDeviceId(leaderIp).catch(() => null);
+    if (!masterDeviceId) return;
+    const memberData = await Promise.all(memberIps.map(async ip => ({
+      ip, deviceId: await getDeviceId(ip).catch(() => null),
+    })));
+    const valid = memberData.filter(m => m.deviceId);
+    if (!valid.length) return;
+    const membersXml = valid.map(m => `<member ipaddress="${m.ip}">${m.deviceId}</member>`).join('');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><zone master="${masterDeviceId}" senderIPAddress="${leaderIp}">${membersXml}</zone>`;
+    await apiPost(leaderIp, '/setZone', xml).catch(e => console.warn('[autoTransition] setZone failed:', e));
+    setTimeout(() => { fetchMaGroups(); pollAll(); }, 1000);
+  };
+
   const onMaStop = (speakerIp) => {
     const name = speakerData[speakerIp]?.name;
     const queueId = (name && haConfig?.speakerQueues?.[name]) || haConfig?.queues?.airplayGroup;
@@ -2014,10 +2152,9 @@ function AllSpeakersView() {
     const hasWiiM = speakerData[memberIp]?.brand === 'wiim' || speakerData[leaderIp]?.brand === 'wiim';
 
     const hasMAEntity = !!(leaderName && haConfig?.speakerEntities?.[leaderName]);
-    // Use MA grouping for any MA-managed speaker not playing native UPnP.
-    // Covers AirPlay, Pandora, Spotify, Apple Music, AUX — any source MA can manage.
-    // Native UPNP (direct NAS) still uses Bose zone grouping.
-    if (hasMAEntity && memberName && leaderSource !== 'UPNP') {
+    // Use MA grouping only when the source is AIRPLAY (MA is managing playback).
+    // All native Bose sources (UPNP, BLUETOOTH, LOCAL_INTERNET_RADIO, etc.) use zone grouping.
+    if (hasMAEntity && memberName && leaderSource === 'AIRPLAY') {
       const queueId = haConfig?.speakerQueues?.[leaderName];
       return await joinToGroup(leaderIp, memberIp, leaderName, memberName, queueId)
         .then(() => null)
@@ -2025,8 +2162,8 @@ function AllSpeakersView() {
     } else if (leaderName && !hasMAEntity) {
       console.warn('[joinSpeakerNow] no HA entity for leader:', leaderName);
     }
-    // Bose zone grouping only for native UPnP/NAS direct or speakers without MA entity
-    if (!hasWiiM && (leaderSource === 'UPNP' || !hasMAEntity)) {
+    // Bose zone grouping for all non-AIRPLAY sources and speakers without MA entity
+    if (!hasWiiM && (leaderSource !== 'AIRPLAY' || !hasMAEntity)) {
       await addSpeakerToGroup(leaderIp, memberIp);
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);

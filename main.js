@@ -11,6 +11,8 @@ const speakerDiscovery = require('./speakerDiscovery');
 const boseWatcher      = require('./boseWatcher');
 const wiimDiscovery    = require('./wiimDiscovery');
 const { mountNas } = require('./nasMount');
+const pandoraTracker   = require('./pandoraTracker');
+const { getAllQueues, maPost } = require('./maClient');
 
 const PORT = 3000;
 
@@ -43,4 +45,5 @@ server.listen(PORT, async () => {
   setInterval(() => speakerDiscovery.discoverSpeakers().catch(() => {}), 30000);
   boseWatcher.start(speakerDiscovery.getSpeakers());
   wiimDiscovery.start();
+  pandoraTracker.start(getAllQueues, maPost);
 });
