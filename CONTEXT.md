@@ -35,6 +35,9 @@ A custom Bose SoundTouch controller built to replace functionality lost as Bose 
 | `/ha/*` | Music Assistant integration (`haHandler.js`) |
 | `/speakers` | Discovered speaker list |
 | `/serverInfo` | Returns `{ base: "http://<LAN_IP>:3000" }` |
+| `/tests`, `/issues` | Test case + issue log (`testsHandler.js`) |
+| `/usage` | Speaker usage frequency counter (`usageHandler.js`) |
+| `/snapshot` | UI snapshot (`snapshotHandler.js`) |
 | `/*` | Static files from `public/` |
 
 WebSocket connections (`ws://`) are proxied separately via `wsProxy.js`.
@@ -45,6 +48,21 @@ WebSocket connections (`ws://`) are proxied separately via `wsProxy.js`.
 - `ftpClient.js` is pure Node.js `net` module (no npm): implements PASV, LIST, SIZE, RETR
 - Audio is streamed: FTP RETR socket piped directly into the HTTP response
 - `nasConfig.json` (git-ignored) holds `{ host, share, username, password }`
+
+### Speaker Usage Tracking (`usageHandler.js`)
+
+Persists per-speaker usage counts to `usage.json` (git-ignored, lives alongside `haConfig.json`).
+
+- `GET /usage` → `{ "Bose-Sunroom 300": 42, ... }` — returns all counts
+- `POST /usage { name }` → increments count for that speaker
+
+**On page load**, `AllSpeakersView` fetches usage counts, sorts SPEAKERS by count descending, computes the max rank shift vs the hardcoded SPEAKERS order. If any speaker would move **≥10 positions**, the session uses the frequency-sorted order for display. This `sessionOrder` is stored in React state (`useState(null)`) and is never written back — it only applies for the current browser session.
+
+**Usage is recorded** (via fire-and-forget `fetch`) on: volume release (`immediate === true`), mute toggle, any key press (play/pause/stop/skip), join group (both leader and member), MA stop, NAS folder play, favorite play.
+
+**Two ordering consumers** both use `sessionOrder` when set:
+1. `AllSpeakersView` — `ipOrder` for tier-based group sorting
+2. `WholeHouseView` — `origOrder` for cluster tie-breaking (receives `baseOrder` prop)
 
 ### UPnP Playback (`upnpHandler.js`)
 - Uses SSDP (UDP multicast 239.255.255.250:1900, ST: ssdp:all) to discover each speaker's UPnP device description URL dynamically
@@ -79,12 +97,16 @@ Music Assistant (MA) runs inside Home Assistant on the same Pi, accessible at `h
 | `GET /ha/queues` | Lists all MA queues (discovery/debug) |
 | `GET /ha/ma-players` | Returns MA player states including `synced_to`, `state`, `can_group_with` |
 | `GET /ha/group-state` | Returns active MA sync groups. Primary source: MA `players/all` `synced_to` field (immediate). Supplementary: HA entity `group_members` (catches WiiM). |
-| `GET /ha/queue-now-playing?queueId=` | Returns track/artist/art/duration/position from MA queue. For radio/Pandora: duration falls back to `stream_metadata.duration` (item.duration is null for radio); position returns 0 (queue.elapsed_time is cumulative queue time, not per-track — let client timer handle it). |
+| `GET /ha/queue-now-playing?queueId=` | Returns track/artist/album/art/duration/position from MA queue. For each field, tries `stream_metadata` first (populated for radio/Pandora), then falls back to item-level fields (`item.artists`, `item.album.name`, `item.image.path`) which are populated for Apple Music tracks. For radio/Pandora: duration falls back to `stream_metadata.duration`; position returns 0 (queue.elapsed_time is cumulative queue time, not per-track — client timer handles it). |
 | `GET /ha/raw-states` | Dumps raw HA entity states for all speakerEntities (debug) |
 | `GET /ha/ma-entities` | Lists all non-STP media_player entities from HA (debug/discovery) |
 | `GET /ha/pandora-playlists` | Returns all Pandora→Apple Music playlists from pandoraPlaylists.json |
 | `POST /ha/pandora-playlists` | Overwrites playlist data (used for one-time backfill/restore) |
-| `POST /ha/pandora-play-playlist` | Play a collected playlist `{ stationName, queueId }`. Uses MA playlist if found, otherwise shuffles and enqueues Apple Music URIs directly. |
+| `POST /ha/pandora-play-playlist` | Play a collected playlist shuffled `{ stationName, queueId }`. Uses MA playlist if found, otherwise enqueues Apple Music URIs directly. |
+| `POST /ha/play-playlist-album` | Start Playlist Album Mode `{ stationName, queueId }`. If something is currently playing, watches it without interrupting; otherwise starts the first shuffled track. |
+| `GET /ha/hybrid-mode` | Returns active Playlist Album Mode sessions with phase, stationName, playlistIndex, playlistTotal, upcomingAlbums |
+| `POST /ha/hybrid-mode { queueId }` | Stop Playlist Album Mode for a queue |
+| `GET /ha/queue-tracks?queueId=` | Returns MA queue track list via `player_queues/items` plus currentUri/currentName from queue state (for current-position detection) |
 | `POST /ha/stop` | Stop a queue `{ queueId }` |
 | `POST /ha/pause` | Pause a queue |
 | `POST /ha/resume` | Resume a queue |
@@ -146,6 +168,80 @@ Background module started in `main.js`. Polls all MA queues every 5s via `player
 - `music/playlists/add_playlist_tracks` with `{ db_playlist_id: "26", uris: ["library://track/..."] }` — returns a background task JSON, completes asynchronously
 - `music/search` with `media_types: ['track']` — returns tracks across all providers including Apple Music
 
+### Playlist Album Mode (`hybridOrchestrator.js`)
+
+Plays tracks from a local Pandora-sourced playlist, expanding each track to its full album before moving to the next playlist entry.
+
+**User flow:**
+1. Click `💿 Albums` next to a Local Playlist entry in any speaker card
+2. If something is playing on that queue: watches it without interruption. If nothing is playing: starts the first shuffled playlist track.
+3. Pre-fetches the full album ~60s before track end (or immediately if starting mid-track — remaining time unknown)
+4. When the track ends (queue idle or MA advances), plays the full album
+5. When album finishes (queue idle + no current_item), plays next shuffled playlist track
+6. Loops; reshuffles when playlist is exhausted
+
+**Key behaviors:**
+- No interruption on start: records `watchedTrackKey = title|artist` and fetches album immediately
+- Track end detected two ways: `queue.state === 'idle'` OR `current_item` key changed from `watchedTrackKey`
+- Album idle guard: only advances when BOTH `state === 'idle'` AND `!current_item` — prevents catching transient idle while MA loads the first album track after `play_media`
+- No blind fallback: if album search fails, skips to `advanceToNextTrack` rather than playing wrong content
+- Switching playlists: clicking `💿 Albums` on a different playlist stops current session and starts fresh (plays first track immediately, not watching existing)
+
+**Phase state machine** (per queue):
+- `track` — watching playlist track; wall-clock pre-fetch at ≤60s remaining; watches for end
+- `fetching` — Apple Music search in progress (poll skips)
+- `album` — album playing; watches for queue truly idle
+
+**State flags:**
+- `watchedTrackKey` — `"title|artist"` string; compared to `current_item` each poll
+- `trackEndedDetected` — prevents repeated action on same end event; reset in `advanceToNextTrack`
+- `albumFetchStarted` / `albumFetchDone` — `Done` set when fetch completes with no result; poll uses it to call `advanceToNextTrack` if track already ended
+- `pendingAlbumTracks` — pre-fetched album track array (nulled at start of `playAlbum`)
+- `currentAlbumName` — set in `playAlbum`, exposed in `getAll()`
+
+**Album search (two strategies):**
+
+*Strategy 1*: Search tracks by title+artist. URI match trusted; name match also requires artist match (prevents wrong version for identical titles). Gets album `item_id` from `track.album.item_id`.
+
+*Strategy 2*: Search albums by `albumName + artist`. Requires BOTH artist AND name match — no artist-only fallback (eliminated the "Gladiator soundtrack for 2Cellos" class of bug).
+
+**Album start rule:** Seed at track 1 → play from track 2. Seed at any other position → play full album from track 1 (seed repeats later, user said this is OK).
+
+**`getAll()` response per queue:**
+```json
+{
+  "phase": "track|fetching|album",
+  "stationName": "Radiohead Radio",
+  "playlistIndex": 3,
+  "playlistTotal": 47,
+  "currentAlbumName": "In Rainbows",
+  "upcomingAlbums": [
+    { "artist": "Radiohead", "album": "OK Computer", "title": "Paranoid Android" }
+  ]
+}
+```
+`upcomingAlbums` starts at `playlistIndex` (track phase) or `playlistIndex+1` (album phase). Up to 20 entries. `title` included as fallback when `album` is empty.
+
+**No disk persistence.** State is in-memory only; server restart clears it.
+
+**UI:** `💿 Albums` button (purple when active, normal border when inactive) appears next to `▶ Play` for each Local Playlist entry. Purple = album mode running for this playlist on this speaker's queue. Clicking while active stops the session. Clicking a different playlist while one is running stops the current session first.
+
+### Now Playing Modal (`NowPlayingModal` in app2.jsx)
+
+Full-screen overlay. Opened via a queue icon (≡) in the playback controls row (shown only when source is MA). Also tap-to-enlarge art now uses the same aesthetic.
+
+**Layout:** Dark background with blurred album art ambient glow. Large square art with drop shadow. Track/artist/album below (word-wrapped, no truncation). Progress bar. Large controls. Scrollable queue below.
+
+**Queue (normal mode):** Calls `GET /ha/queue-tracks` → `player_queues/items` (up to 50 items) + `currentUri`/`currentName` from queue state. Finds current position by URI or name match, splits: before = Recently Played (reversed), after = Up Next. Each `QueueTrackRow` shows `image.path` art, track, artist, album, duration.
+
+**Queue (album mode):** When `hybridQueues[queueId]` exists, shows "Coming Up" list of upcoming albums from `/ha/hybrid-mode`. Polls every 8s while modal is open (managed inside NowPlayingModal, not the parent).
+
+**Flicker fix:** `QueueTrackRow` and `NowPlayingAlbumRow` are module-level functions. Defining them inside `NowPlayingModal` caused React to treat them as new types every second (when `position` prop ticked), unmounting and remounting all rows and reloading images.
+
+**MA image field:** Queue items have `image: { path: "https://..." }` (object, not string). `getImg()` checks `typeof raw === 'string'` before accessing `.path`.
+
+---
+
 ### `/ha/group-state` — Group Detection Logic
 
 Three-step approach (in order):
@@ -179,7 +275,7 @@ The code uses "any entity that has OTHER known entities in its group_members is 
 - **Phantom group detection:** Standalone speakers playing the same AirPlay track+artist within 15s of each other are detected as a phantom group and merged in the UI. Speakers in `removingMembersRef.current` are excluded from phantom detection to prevent re-absorption during ungrouping.
 - **Release to TV:** Shown only on speakers in `haConfig.releaseToTV` (Sunroom 300). Stops+clears MA queue so HA doesn't auto-restart when soundbar switches to TV.
 - **Per-speaker power button (⏻):** Shown in the speaker header row of each zone card.
-- **Sort order:** Active multi-speaker groups first, then active solo, then idle. Within each tier, sorted by SPEAKERS constant order (Sunroom 300 first).
+- **Sort order:** Active multi-speaker groups first, then active solo, then idle. Within each tier, sorted by usage frequency (`sessionOrder` from `/usage` counts, if any speaker would shift ≥10 ranks vs SPEAKERS default — otherwise falls back to SPEAKERS constant order, Sunroom 300 first).
 - **MA track metadata:** When source=AIRPLAY or source=AUX (with redirect), polls `/ha/queue-now-playing` for track/artist/art/duration/position. For MA sources, `maTrack.track/artist/art` are preferred over `np.track/artist/art` (Bose's AirPlay metadata carries station-level info, not per-track). Progress bar and timer use MA data when Bose reports 0.
 - **Progress timer for Pandora/radio:** `effectiveDuration` uses `stream_metadata.duration` (not `item.duration`, which is null for radio). `effectivePosition` starts at 0 on each new track (MA's `elapsed_time` is cumulative queue time — unusable as per-track position). Client timer ticks forward from 0 and resets via `useEffect([effectiveTrack, ...])` when `maTrack.track` changes.
 - **Source-based grouping routing:** MA grouping (`group-include`/`group-remove`) is only used when leader source = AIRPLAY. All other sources (BLUETOOTH, UPNP, AUX, etc.) use native Bose zone API (`/setZone`, `/removeZoneSlave`).
@@ -294,10 +390,40 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 
 ---
 
+## HA Integration Housekeeping (May 2026)
+
+### SoundTouchPlus (STP) — Removed
+The SoundTouchPlus HACS integration (`soundtouchplus` domain) was installed alongside Music Assistant but is **no longer used**. It stored static IPs for all 10 speakers; after the May 6 cloud shutdown, all those IPs became stale (DHCP reassigned them). This caused a continuous flood of `BST0001E — Host is unreachable` errors in the HA core log every ~60s per speaker.
+
+The app never used STP entities — all configured `speakerEntities` use MA `_6` suffix entities. `haHandler.js` even has an explicit `!s.entity_id.includes('stp_')` filter. The 10 `soundtouchplus` config entries are being deleted via `DELETE /api/config/config_entries/entry/<id>`.
+
+The **built-in `soundtouch` HA integration** (10 entries, `_4` suffix entities) is also unused but not yet removed. It creates `media_player.bose_kitchen_4` style entities. MA (`_6`) entities are unaffected by removing either.
+
+**Entity origin key:**
+| Suffix | Created by | Status |
+|--------|-----------|--------|
+| `_4` | built-in `soundtouch` HA integration | unused — safe to remove |
+| `_5` | `soundtouchplus` HACS integration | removed (was causing log flood) |
+| `_6` | Music Assistant | **in use — do not remove** |
+
+### HA Log Verification Endpoints
+- `GET /api/hassio/core/logs` (via Supervisor API, Bearer `haToken`) — HA core log with ANSI color codes
+- `GET /api/hassio/supervisor/logs` — Supervisor log
+- `GET /api/config/config_entries/entry` — lists all config entries (domain, title, state)
+- `GET /api/states` — all entity states
+- `/api/error_log` and `/api/repairs/issues` return 404 on this HA version (2026.5.1) — use Supervisor API instead
+
+---
+
 ## Future TODOs
 
+### Playlist Album Mode — ongoing polish
+- **FF within album:** pressing next in the Now Playing modal while an album is playing advances within the album correctly. However if pressed at the very last track, the queue goes idle → `advanceToNextTrack` → next playlist track starts (different artist). This is correct behavior but may feel surprising if the user expected to jump to the next Coming Up album.
+- **Playlist track album names:** Pandora's stream metadata often omits the album name, leaving `album: ''` in `pandoraPlaylists.json`. The `upcomingAlbums` list shows `title — album` as a fallback. There's no retroactive way to fill in missing album names without replaying those tracks.
+- **Album mode + MA queue fight:** if the user presses `▶ Play` on a regular playlist and then immediately clicks `💿 Albums`, the original queue still has all tracks loaded. The orchestrator detects the advance (when it happens) and replaces with the album. No silent fix needed — behavior is acceptable.
+
 ### Pandora timer reset on track change — UNRESOLVED
-The timer does not reset to 0 when a new Pandora track starts (confirmed May 2026). The fix (preferring `maTrack.track` over `np.track` for MA sources so `effectiveTrack` changes per-track) was deployed but did not work. Root cause still unknown — either `maTrack.track` is not changing between tracks, or the useEffect dependency isn't firing as expected. Next step: log `maTrack.track` on each render or check `/ha/queue-now-playing` manually between tracks to see if the title actually changes.
+The timer does not reset to 0 when a new Pandora track starts (confirmed May 2026). The fix (preferring `maTrack.track` over `np.track` for MA sources so `effectiveTrack` changes per-track) was deployed but not yet confirmed. Two logged issues in the test page also reference this. Next step: check `/ha/queue-now-playing` manually between tracks to see if the title actually changes.
 
 ### Group add/remove delays — check if removable
 After `players/cmd/group`/`ungroup`, the code waits 100ms before calling `fetchMaGroups`. This was reduced from 1000–1500ms (trial-and-error from when group-state relied on slow HA entity attributes). With MA `synced_to` as primary source (immediate), these delays may be removable entirely. Try 0ms if grouping has been reliable.
@@ -591,3 +717,11 @@ Key events:
 | `music/playlists/add_playlist_item` with `item_id` | Wrong command and wrong arg name. Correct: `music/playlists/add_playlist_tracks` with `db_playlist_id` (string, e.g. `"26"`). |
 | `queue.elapsed_time` as per-track position for display | It's cumulative queue time (total time the station/queue has been playing), not position within the current track. For Pandora radio, Bose's AirPlay position is always 0 (radio not seekable), and falling back to `elapsed_time` showed "total time since station started." Fixed: return 0 for radio sources; client timer handles per-track counting. |
 | `np.track / np.art` for MA source display | For AIRPLAY, Bose receives station-level AirPlay metadata from MA (station art, static station name), not per-track. For Pandora specifically: art was stuck on station art, track name was static. Fixed: prefer `maTrack.track/artist/art` (from `stream_metadata`) for MA sources. |
+| `player_queues/queue_tracks` for queue item list | Wrong command name. Correct is `player_queues/items` with `{ queue_id, offset, limit }`. |
+| `player_queues/stop` before album fetch in orchestrator | Added to silence "wrong artist" playing while album is being fetched. Caused MA to try to restore previous state, fighting with subsequent `play_media` calls — produced rapid 3-second snippets of many different songs. Removed. |
+| `player_queues/clear` on album mode start | Added to remove upcoming queued tracks so queue goes idle when seed track ends. Cleared the currently playing track too, interrupting playback. Removed — orchestrator now uses `watchedTrackKey` comparison to detect natural track advancement. |
+| `queue.state === 'idle'` alone for album phase advance | Transient idle during MA loading of first album track (after `play_media`) caused premature `advanceToNextTrack`. Fixed: require both `state === 'idle'` AND `!current_item`. |
+| Artist-only fallback in album search Strategy 2 | If name didn't match but artist did, used the first artist-match as fallback. Too loose — caused 2Cellos searches to return Hans Zimmer's Gladiator soundtrack. Removed; now requires both artist AND album name to match or returns nothing. |
+| `TrackRow` defined inside `NowPlayingModal` | Caused React to create new component type on every render (position ticks every second), unmounting and remounting all rows and reloading images — 1-second flicker. Fixed by moving to module level as `QueueTrackRow`. |
+| `item.image` as string for queue item art | MA returns image as `{ path: "https://..." }` object, not a string. `typeof raw === 'string'` check added to `getImg` helper. |
+| `meta?.artist` / `meta?.album` only for MA now-playing | `stream_metadata` is populated for Pandora radio but empty for regular Apple Music tracks. Apple Music tracks have artist in `item.artists[]` and album in `item.album.name`. Fixed: fallback to item-level fields. |

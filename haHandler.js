@@ -7,6 +7,9 @@ const pandoraTracker = require('./pandoraTracker');
 // Track the station URI most recently played on each queue (for stop→rejoin→restart)
 const activeStationUris = {};
 
+// Per-queue Pandora track-start state: { trackKey, startElapsed } — lets us compute per-track position from cumulative elapsed_time
+const pandoraPositionState = {};
+
 // Look up HA media_player entity ID from Bose speaker name via haConfig.speakerEntities
 function speakerNameToEntityId(name) {
   const cfg = getConfig();
@@ -162,6 +165,7 @@ async function handleHa(req, res) {
   // POST /ha/clear — clear a queue (stop + remove all items so MA won't restart) { queueId }
   if (url === '/ha/clear' && req.method === 'POST') {
     const body = await readBody(req);
+    require('./hybridOrchestrator').stop(body.queueId);
     try {
       const result = await clearQueue(body.queueId);
       console.log('[ha/clear] queueId=%s result=%j', body.queueId, result);
@@ -354,6 +358,9 @@ async function handleHa(req, res) {
     const cfg = getConfig();
     const speakerQueueId = cfg.speakerQueues?.[body.speakerName];
     const groupQueueId   = cfg.queues?.airplayGroup;
+    const hybrid = require('./hybridOrchestrator');
+    if (speakerQueueId) hybrid.stop(speakerQueueId);
+    if (groupQueueId)   hybrid.stop(groupQueueId);
     try {
       const ops = [];
       if (speakerQueueId) ops.push(stopQueue(speakerQueueId).then(() => clearQueue(speakerQueueId)));
@@ -417,6 +424,7 @@ async function handleHa(req, res) {
   // POST /ha/play — play a favorite { queueId, uri }
   if (url === '/ha/play' && req.method === 'POST') {
     const body = await readBody(req);
+    require('./hybridOrchestrator').stop(body.queueId);
     try {
       const cfg = getConfig();
       let { queueId, uri } = body;
@@ -482,21 +490,45 @@ async function handleHa(req, res) {
       const mediaType = item?.media_item?.media_type || item?.streamdetails?.media_type || null;
       const stationName = mediaType === 'radio' ? (item?.media_item?.name || item?.name || null) : null;
       const provider = item?.streamdetails?.provider || null;
-      // For radio/Pandora: item.duration is null; real duration is in stream_metadata.
-      // elapsed_time is cumulative queue time (not per-track position) — unusable for radio.
+      // elapsed_time is cumulative queue time across all tracks — NOT per-track position.
+      // For Pandora: detect track changes and record the elapsed_time when each new track starts,
+      // then compute per-track position as (elapsed_time - startElapsed).
       const isRadio = mediaType === 'radio' || provider === 'pandora';
+      const trackKey = (meta?.title || item?.name || '') + '|' + (meta?.artist || '');
+      let position = 0, positionUpdatedAt = null;
+      if (isRadio && queueId) {
+        const prev = pandoraPositionState[queueId];
+        if (!prev || prev.trackKey !== trackKey) {
+          // Prefer pandoraTracker's start position — it polls independently from server start
+          // and catches the track earlier than the client's first poll. Its key is "artist|title"
+          // vs our "title|artist", so flip to compare.
+          const trackerState = pandoraTracker.getTrackState(queueId);
+          const trackerKeyFlipped = (trackerState?.trackKey || '').split('|').reverse().join('|');
+          const bestStart = (trackerKeyFlipped === trackKey && trackerState.queueElapsedAtStart != null)
+            ? trackerState.queueElapsedAtStart
+            : (queue?.elapsed_time || 0);
+          pandoraPositionState[queueId] = { trackKey, startElapsed: bestStart };
+        }
+        const startElapsed = pandoraPositionState[queueId].startElapsed;
+        position = Math.max(0, (queue?.elapsed_time || 0) - startElapsed);
+        positionUpdatedAt = queue?.elapsed_time_last_updated || null;
+      } else {
+        position = queue?.elapsed_time || 0;
+        positionUpdatedAt = queue?.elapsed_time_last_updated || null;
+      }
       ok(res, {
         track:    meta?.title  || item?.name || null,
-        artist:   meta?.artist || null,
-        album:    meta?.album  || null,
-        art:      meta?.image_url || item?.image?.path || null,
+        artist:   meta?.artist || (item?.artists || item?.media_item?.artists || [])[0]?.name || null,
+        album:    meta?.album  || item?.album?.name || item?.media_item?.album?.name || null,
+        art:      meta?.image_url || item?.image?.path || item?.media_item?.image?.path || null,
         uri:      item?.media_item?.uri || null,
         duration: item?.duration || (isRadio ? (meta?.duration || 0) : 0),
-        position: isRadio ? 0 : (queue?.elapsed_time || 0),
-        positionUpdatedAt: isRadio ? null : (queue?.elapsed_time_last_updated || null),
+        position,
+        positionUpdatedAt,
         mediaType,
         stationName,
         provider,
+        isRadio,
       });
     } catch (e) { err(res, e.message); }
     return;
@@ -555,7 +587,34 @@ async function handleHa(req, res) {
   // GET /ha/station-uri?queueId=... — return the station URI last played on a queue (for restart after group join)
   if (url.startsWith('/ha/station-uri') && req.method === 'GET') {
     const queueId = new URL('http://x' + url).searchParams.get('queueId');
-    ok(res, { uri: activeStationUris[queueId] || null });
+    let uri = activeStationUris[queueId] || null;
+    // Fallback: read URI from the current queue item (survives server restarts)
+    if (!uri) {
+      try {
+        const queues = await getAllQueues();
+        const queue  = (queues || []).find(q => q.queue_id === queueId);
+        const itemUri = queue?.current_item?.media_item?.uri || null;
+        if (itemUri) uri = itemUri;
+      } catch {}
+    }
+    ok(res, { uri });
+    return;
+  }
+
+  // GET /ha/queue-tracks?queueId=... — return the MA queue track list (current + upcoming + history)
+  if (url.startsWith('/ha/queue-tracks') && req.method === 'GET') {
+    const queueId = new URL('http://x' + url).searchParams.get('queueId');
+    if (!queueId) { err(res, 'queueId required'); return; }
+    try {
+      const [tracks, queues] = await Promise.all([
+        maPost('player_queues/items', { queue_id: queueId, offset: 0, limit: 50 }),
+        getAllQueues(),
+      ]);
+      const arr   = Array.isArray(tracks) ? tracks : [];
+      const queue = Array.isArray(queues) ? queues.find(q => q.queue_id === queueId) : null;
+      const currentItem = queue?.current_item || null;
+      ok(res, { tracks: arr, currentUri: currentItem?.uri || null, currentName: currentItem?.name || null });
+    } catch (e) { err(res, e.message); }
     return;
   }
 
@@ -625,17 +684,21 @@ async function handleHa(req, res) {
         queueToName[queueId] = name;
       }
 
-      // Find the true MA leader: the non-idle player with synced_to=null that belongs to
-      // a known speaker. HA entity state is unreliable when multiple members show identical
-      // group_members lists — use MA's synced_to field instead.
+      // Identify the true MA leader. If the configured leader is itself playing, trust it.
+      // Only fall back to scanning for the first non-idle player when the configured leader
+      // is idle — this prevents falsely "correcting" to another speaker (e.g. Sunroom) that
+      // happens to be paused and appears earlier in the MA player list.
       let leaderPlayerId = nameToQueue[body.masterName];
-      for (const player of (maPlayers || [])) {
-        if (player.synced_to === null && player.state !== 'idle' && queueToName[player.player_id]) {
-          if (player.player_id !== leaderPlayerId) {
-            console.log('[ha/group-include] correcting leader: %s → %s', leaderPlayerId, player.player_id);
-            leaderPlayerId = player.player_id;
+      const configuredLeaderPlayer = (maPlayers || []).find(p => p.player_id === leaderPlayerId);
+      if (!configuredLeaderPlayer || configuredLeaderPlayer.state === 'idle') {
+        for (const player of (maPlayers || [])) {
+          if (player.synced_to === null && player.state !== 'idle' && queueToName[player.player_id]) {
+            if (player.player_id !== leaderPlayerId) {
+              console.log('[ha/group-include] correcting leader: %s → %s', leaderPlayerId, player.player_id);
+              leaderPlayerId = player.player_id;
+            }
+            break;
           }
-          break;
         }
       }
 
@@ -916,6 +979,150 @@ async function handleHa(req, res) {
         : [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(relevant, null, 2));
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/queue-health — cross-reference MA playing queues against actual speaker state
+  if (url === '/ha/queue-health' && req.method === 'GET') {
+    const cfg = getConfig();
+    if (!cfg.features?.queueHealthCheck) { ok(res, { enabled: false, ok: true, issues: [] }); return; }
+    try {
+      const { getAllPlayers } = require('./maClient');
+      const boseSources = require('./boseWatcher').getSources();
+      const [allQueues, allPlayers] = await Promise.all([getAllQueues(), getAllPlayers().catch(() => [])]);
+
+      const speakerQueues  = cfg.speakerQueues  || {};
+      const playRedirects  = cfg.playRedirects  || [];
+      const queueToName    = Object.fromEntries(Object.entries(speakerQueues).map(([n, q]) => [q, n]));
+      const playerById     = Object.fromEntries((allPlayers || []).map(p => [p.player_id, p]));
+      const queueById      = Object.fromEntries((allQueues  || []).map(q => [q.queue_id, q]));
+
+      const issues = [];
+
+      const checkQueue = (queueId, label, expectedBoseSource, boseSpkName) => {
+        const q = queueById[queueId];
+        if (!q || q.state !== 'playing') return;
+
+        if (expectedBoseSource && boseSpkName) {
+          // Bose speaker check via cached hardware source
+          const src = boseSources[boseSpkName];
+          if (src && src !== expectedBoseSource) {
+            issues.push({ speaker: label, issue: `MA playing but Bose on ${src} (not ${expectedBoseSource})`, queueId });
+          }
+          return;
+        }
+
+        // MA player state check (WiiM, Belkin, non-Bose)
+        const player = playerById[queueId];
+        if (player && player.state === 'idle') {
+          issues.push({ speaker: label, issue: 'MA queue playing but player is idle', queueId });
+        }
+        if (player && player.powered === false) {
+          issues.push({ speaker: label, issue: 'MA queue playing but player is powered off', queueId });
+        }
+      };
+
+      for (const [name, queueId] of Object.entries(speakerQueues)) {
+        if (name.startsWith('_')) continue;
+        // Bose speakers: validate via cached hardware source
+        if (name.startsWith('Bose-')) {
+          const redirect = playRedirects.find(r => r.speakerName === name && r.boseSwitchInput?.source);
+          const expected = redirect?.boseSwitchInput?.source || 'AIRPLAY';
+          checkQueue(queueId, name, expected, name);
+          // Also check redirect target queue (e.g. Belkin for Bose-Bedroom)
+          if (redirect?.toQueue) {
+            const rSrc = boseSources[name];
+            if (rSrc && rSrc !== redirect.boseSwitchInput.source) {
+              const rq = queueById[redirect.toQueue];
+              if (rq?.state === 'playing') {
+                issues.push({ speaker: `${name} (AirPlay adapter)`, issue: `MA playing but Bose on ${rSrc} (not ${redirect.boseSwitchInput.source})`, queueId: redirect.toQueue });
+              }
+            }
+          }
+        } else {
+          // WiiM and other non-Bose: check MA player state
+          checkQueue(queueId, name, null, null);
+        }
+      }
+
+      ok(res, { enabled: true, ok: issues.length === 0, issues });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/hybrid-mode — return all active playlist album mode queues
+  // POST /ha/hybrid-mode { queueId } — stop playlist album mode for a queue
+  if (url === '/ha/hybrid-mode') {
+    if (req.method === 'GET') {
+      const hybrid = require('./hybridOrchestrator');
+      ok(res, { queues: hybrid.getAll() });
+      return;
+    }
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      const { queueId } = body;
+      if (!queueId) { err(res, 'queueId required'); return; }
+      const hybrid = require('./hybridOrchestrator');
+      hybrid.stop(queueId);
+      ok(res, {});
+      return;
+    }
+  }
+
+  // GET /ha/find-album-for-track?title=...&artist= — probe whether an album exists (no playback)
+  if (url.startsWith('/ha/find-album-for-track') && req.method === 'GET') {
+    const params = new URL('http://x' + url).searchParams;
+    const title  = params.get('title')  || '';
+    const artist = params.get('artist') || '';
+    const album  = params.get('album')  || '';
+    console.log('[find-album] searching: "%s" by "%s" (album: "%s")', title, artist, album || 'unknown');
+    try {
+      const { findAlbumTracks } = require('./hybridOrchestrator');
+      const result = await findAlbumTracks(title, artist, album, null);
+      if (result) console.log('[find-album] found "%s" (%d tracks)', result.albumName, result.tracks.length);
+      else console.log('[find-album] not found for "%s"', title);
+      ok(res, result ? { found: true, albumName: result.albumName, trackCount: result.tracks.length } : { found: false });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/album-once { queueId, stationUri } — play Apple Music album for current Pandora track, then restart station
+  if (url === '/ha/album-once' && req.method === 'POST') {
+    const body = await readBody(req);
+    const { queueId, stationUri, stationName } = body;
+    if (!queueId || !stationUri) { err(res, 'queueId and stationUri required'); return; }
+    try {
+      const hybrid = require('./hybridOrchestrator');
+      const result = await hybrid.startAlbumOnce(queueId, stationUri, stationName);
+      if (result.error) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: result.error })); return; }
+      ok(res, result);
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/play-playlist-album { stationName, queueId } — play a local playlist in album mode
+  if (url === '/ha/play-playlist-album' && req.method === 'POST') {
+    const body = await readBody(req);
+    const { stationName, queueId } = body;
+    if (!stationName || !queueId) { err(res, 'stationName and queueId required'); return; }
+    const data = pandoraTracker.loadData();
+    const station = data[stationName];
+    if (!station || !station.tracks.length) {
+      err(res, 'No tracks collected for station: ' + stationName);
+      return;
+    }
+    const appleUriTracks = station.tracks.filter(t => t.appleUri);
+    if (!appleUriTracks.length) {
+      err(res, 'No Apple Music tracks available for station: ' + stationName);
+      return;
+    }
+    const shuffled = [...appleUriTracks].sort(() => Math.random() - 0.5);
+    try {
+      const hybrid = require('./hybridOrchestrator');
+      const result = await hybrid.startPlaylist(queueId, shuffled, stationName);
+      if (result.error) { err(res, result.error); return; }
+      ok(res, {});
     } catch (e) { err(res, e.message); }
     return;
   }

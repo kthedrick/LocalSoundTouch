@@ -81,6 +81,19 @@ async function addToPlaylist(maPost, stationName, artist, title, album) {
     return;
   }
   const appleUri = appleTrack.uri;
+  let appleAlbum = appleTrack.album?.name || appleTrack.media_item?.album?.name || '';
+
+  // Track search often returns album: null for singles. Do full S1/S2/S2b resolution as fallback
+  // so the playlist entry has a confirmed album name for faster hybrid album lookups later.
+  if (!appleAlbum) {
+    try {
+      const { findAlbumTracks } = require('./hybridOrchestrator');
+      const found = await findAlbumTracks(title, artist, album || '', appleUri);
+      if (found) appleAlbum = found.albumName;
+    } catch (e) {
+      console.warn('[pandoraTracker] album fallback search error:', e.message);
+    }
+  }
 
   // Look up MA playlist by station name (null = not yet looked up, false = looked up, not found)
   if (station.maPlaylistId === null) {
@@ -107,7 +120,7 @@ async function addToPlaylist(maPost, stationName, artist, title, album) {
   }
 
   // Always persist in JSON (used for UI + shuffle fallback playback)
-  station.tracks.push({ artist, title, album: album || '', appleUri, addedAt: new Date().toISOString() });
+  station.tracks.push({ artist, title, album: appleAlbum || album || '', appleUri, addedAt: new Date().toISOString() });
   data[stationName] = station;
   saveData(data);
   console.log('[pandoraTracker] added "%s - %s" to "%s" (%d tracks)',
@@ -119,6 +132,10 @@ function start(getAllQueues, maPost) {
     try {
       const queues = await getAllQueues();
       if (!Array.isArray(queues)) return;
+
+      const { getConfig } = require('./maClient');
+      const speakerQueues = getConfig().speakerQueues || {};
+      const queueToName = Object.fromEntries(Object.entries(speakerQueues).map(([n, q]) => [q, n]));
 
       for (const queue of queues) {
         const item = queue.current_item;
@@ -132,6 +149,7 @@ function start(getAllQueues, maPost) {
         if (queue.state !== 'playing') continue;
 
         const queueId     = queue.queue_id;
+        const speakerName = queueToName[queueId] || queue.display_name || queue.name || queueId;
         const sm          = sd.stream_metadata || {};
         const stationName = item.media_item?.name || item.name || 'Pandora';
         const artist      = sm.artist || (item.artists || [])[0]?.name || '';
@@ -145,7 +163,7 @@ function start(getAllQueues, maPost) {
 
         if (!seenQueues.has(queueId)) {
           seenQueues.add(queueId);
-          console.log('[pandoraTracker] detected Pandora on queue=%s station="%s"', queueId, stationName);
+          console.log('[pandoraTracker] detected Pandora on %s station="%s"', speakerName, stationName);
         }
 
         const prev = trackState[queueId];
@@ -159,12 +177,12 @@ function start(getAllQueues, maPost) {
             : timeSpent >= 60;
 
           if (completed) {
-            console.log(`[pandoraTracker] completed "${prev.artist} - ${prev.title}" (${Math.round(timeSpent)}s of ${prev.trackDuration}s) → adding to "${prev.stationName}"`);
+            console.log(`[pandoraTracker] completed "${prev.artist} - ${prev.title}" on ${speakerName} (${Math.round(timeSpent)}s of ${prev.trackDuration}s) → adding to "${prev.stationName}"`);
             addToPlaylist(maPost, prev.stationName, prev.artist, prev.title, prev.album).catch(e =>
               console.warn('[pandoraTracker] addToPlaylist error:', e.message)
             );
           } else {
-            console.log(`[pandoraTracker] skipped "${prev.artist} - ${prev.title}" (${Math.round(timeSpent)}s of ${prev.trackDuration}s)`);
+            console.log(`[pandoraTracker] skipped "${prev.artist} - ${prev.title}" on ${speakerName} (${Math.round(timeSpent)}s of ${prev.trackDuration}s)`);
           }
         }
 
@@ -192,4 +210,9 @@ function setActiveStation(queueId, stationName) {
   console.log('[pandoraTracker] setActiveStation queue=%s station="%s" (auto-detection active)', queueId, stationName);
 }
 
-module.exports = { start, setActiveStation, loadData, saveData };
+// Return the current per-queue track state (used by hybridOrchestrator for accurate position)
+function getTrackState(queueId) {
+  return trackState[queueId] || null;
+}
+
+module.exports = { start, setActiveStation, loadData, saveData, getTrackState };

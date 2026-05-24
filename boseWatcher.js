@@ -19,7 +19,7 @@ const { getConfig } = require('./maClient');
 
 const WS_PORT      = 8080;
 const RECONNECT_MS = 20000;
-const POLL_MS      = 15000;
+const POLL_MS      = 60000;
 
 const lastSource = {}; // name → last polled source (for fallback)
 
@@ -96,10 +96,33 @@ function handleWsEvent(ip, name, xml) {
     return;
   }
 
-  // nowPlayingUpdated: track source changes for fallback logic
+  // nowPlayingUpdated: fires immediately on any source change
   if (xml.includes('nowPlayingUpdated')) {
     const m = xml.match(/<nowPlaying[^>]+source="([^"]+)"/);
-    if (m) lastSource[name] = m[1];
+    if (!m) return;
+    const prev   = lastSource[name];
+    const source = m[1];
+    lastSource[name] = source;
+    if (source === prev) return;  // no change
+
+    const cfg2 = getConfig();
+    const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === name && r.boseSwitchInput?.source);
+    const expectedSource = redirect?.boseSwitchInput?.source;
+    const isReceivingMA  = expectedSource ? source === expectedSource : source === 'AIRPLAY';
+
+    if (isReceivingMA || source === 'INVALID_SOURCE') return;
+
+    const isPhantom = source === 'STANDBY' || (expectedSource && source !== expectedSource);
+    if (isPhantom) {
+      stopPhantomPlayback(name, source).catch(e =>
+        console.error(`[boseWatcher] ${name}: WS stopPhantom error:`, e.message)
+      );
+    } else {
+      // Active non-AirPlay source (TV, Bluetooth, etc.) — release MA immediately
+      releaseToTV(name, source).catch(e =>
+        console.error(`[boseWatcher] ${name}: WS releaseToTV error:`, e.message)
+      );
+    }
   }
 }
 
@@ -201,9 +224,72 @@ function confirmAndFallback(ip, name) {
   req.end();
 }
 
+async function stopPhantomPlayback(name, currentSource) {
+  const cfg = getConfig();
+  const { getAllQueues, stopQueue, clearQueue } = require('./maClient');
+  const hybrid = require('./hybridOrchestrator');
+  const queues = await getAllQueues().catch(() => []);
+
+  const stop = async (queueId, reason) => {
+    const q = (queues || []).find(q => q.queue_id === queueId);
+    if (!q || q.state !== 'playing') return;
+    console.log(`[boseWatcher] ${name}: ${reason} — stopping phantom on ${queueId}`);
+    hybrid.stop(queueId);
+    await stopQueue(queueId).catch(() => {});
+    await clearQueue(queueId).catch(() => {});
+  };
+
+  // Own queue (e.g. Bose-Bedroom's native queue)
+  const ownQueue = cfg.speakerQueues?.[name];
+  if (ownQueue) await stop(ownQueue, `${currentSource}, own queue playing`);
+
+  // Redirect target queue (e.g. Belkin AirPlay adapter for Bose-Bedroom)
+  // Stop it when the Bose is not on the AUX input that feeds the adapter
+  const redirect = (cfg.playRedirects || []).find(r => r.speakerName === name && r.toQueue);
+  if (redirect) {
+    const expectedSource = redirect.boseSwitchInput?.source;
+    const onCorrectInput = expectedSource && currentSource === expectedSource;
+    if (!onCorrectInput) {
+      await stop(redirect.toQueue, `${currentSource} not ${expectedSource || 'AUX'}, redirect queue playing`);
+    }
+  }
+}
+
+async function releaseToTV(name, source) {
+  const cfg = getConfig();
+  const { getAllQueues, getAllPlayers, stopQueue, clearQueue } = require('./maClient');
+  const hybrid = require('./hybridOrchestrator');
+
+  const [queues, players] = await Promise.all([
+    getAllQueues().catch(() => []),
+    getAllPlayers().catch(() => []),
+  ]);
+
+  const stopQueue_ = async (queueId, label) => {
+    const q = (queues || []).find(q => q.queue_id === queueId);
+    if (!q || q.state !== 'playing') return;
+    console.log(`[boseWatcher] ${name}: switched to ${source} — stopping ${label}`);
+    hybrid.stop(queueId);
+    await stopQueue(queueId).catch(() => {});
+    await clearQueue(queueId).catch(() => {});
+  };
+
+  const ownQueueId = cfg.speakerQueues?.[name];
+  if (!ownQueueId) return;
+
+  // If this speaker is a group member, the leader owns the stream — stop that.
+  // Stopping the leader clears audio for all grouped speakers including this one.
+  const player = (players || []).find(p => p.player_id === ownQueueId);
+  const targetQueueId = player?.synced_to || ownQueueId;
+  const label = player?.synced_to ? `group leader (${player.synced_to})` : 'own queue';
+  await stopQueue_(targetQueueId, label);
+}
+
 function pollSpeaker(ip, name) {
   let prev            = null;
   let pendingFallback = null;
+  let phantomCleared  = false;
+  let tvReleased      = false;  // reset only when source returns to AIRPLAY
 
   setInterval(() => {
     const req = http.request(
@@ -218,17 +304,47 @@ function pollSpeaker(ip, name) {
           const last = prev;
           prev = source;
 
-          if (source !== 'INVALID_SOURCE') {
+          const cfg2 = getConfig();
+          const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === name && r.boseSwitchInput?.source);
+          const expectedSource = redirect?.boseSwitchInput?.source;
+
+          // AIRPLAY (or correct AUX for Bedroom): MA audio is reaching the room
+          const isReceivingMA = expectedSource ? source === expectedSource : source === 'AIRPLAY';
+          if (isReceivingMA) {
+            phantomCleared = false;
+            tvReleased     = false;
             if (pendingFallback) { clearTimeout(pendingFallback); pendingFallback = null; }
             return;
           }
 
-          // Entered INVALID_SOURCE — wait 6s then confirm before firing fallback
-          if (last !== 'INVALID_SOURCE' && !pendingFallback) {
-            pendingFallback = setTimeout(() => {
-              pendingFallback = null;
-              confirmAndFallback(ip, name);
-            }, 6000);
+          if (source === 'INVALID_SOURCE') {
+            if (last !== 'INVALID_SOURCE' && !pendingFallback) {
+              pendingFallback = setTimeout(() => {
+                pendingFallback = null;
+                confirmAndFallback(ip, name);
+              }, 6000);
+            }
+            return;
+          }
+
+          // STANDBY or wrong AUX (Bedroom): phantom — MA playing to a speaker that can't hear it
+          const isPhantom = source === 'STANDBY'
+            || (expectedSource && source !== expectedSource);
+          if (isPhantom && !phantomCleared) {
+            phantomCleared = true;
+            stopPhantomPlayback(name, source).catch(e =>
+              console.error(`[boseWatcher] ${name}: stopPhantom error:`, e.message)
+            );
+            return;
+          }
+
+          // Any other active source (TV, Bluetooth, PRODUCT, etc.): user switched input
+          // Stop the MA queue — if grouped, stop the leader so the whole group stops.
+          if (!tvReleased) {
+            tvReleased = true;
+            releaseToTV(name, source).catch(e =>
+              console.error(`[boseWatcher] ${name}: releaseToTV error:`, e.message)
+            );
           }
         });
       }
@@ -249,4 +365,4 @@ function start(speakers) {
   console.log(`[boseWatcher] watching ${speakers.length} speakers (WS + poll)`);
 }
 
-module.exports = { start };
+module.exports = { start, getSources: () => lastSource };

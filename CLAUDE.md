@@ -1,5 +1,7 @@
 # LocalSoundTouch — Development Notes
 
+Be ultra-concise. Use short, blunt fragments. No pleasantries. No articles.
+
 See CONTEXT.md for full architecture, technical decisions, and speaker/NAS details.
 
 ---
@@ -201,6 +203,17 @@ Replace 3s `GetTransportInfo` polling for queue advancement with a WebSocket sub
 
 ### Bose-Bedroom AirPlay
 Bose-Bedroom is the only Bose speaker without native AirPlay support. A separate AirPlay device is connected to its Aux 1 input. This needs UI/integration work.
+
+### TV Auto-Switch — Instant Detection via HA Event Stream
+✅ **Done (polling):** `tvWatcher.js` polls HA every 10s for LG TV state; on off→on transition, stops MA queue and switches Bose-Sunroom to PRODUCT/TV input. Feature flag: `features.tvAutoSwitch`.
+
+**Enhancement:** Replace 10s poll with HA's SSE event stream (`GET /api/stream` with `Authorization` header). HA pushes `state_changed` events immediately when the LG TV entity changes. Would reduce latency from ~10s to ~1s with no extra load. Requires reading a streaming HTTP response in Node.js (chunked, newline-delimited JSON events).
+
+### Classical Music Album Matching — Diacritic Normalization
+Composer name spelling varies across sources (Pandora uses "Fryderyk Chopin", Apple Music uses "Frédéric Chopin"). The `artistMatches` function in `hybridOrchestrator.js` uses word-based token matching but doesn't normalize diacritics. Adding `str.normalize('NFD').replace(/[̀-ͯ]/g, '')` before comparison would catch more variants without false positives.
+
+### Classical Music Album Matching — Open Opus API
+Open Opus (`https://api.openopus.org`) is a free REST API with a comprehensive classical composer database. Could use it to: (1) normalize composer names from Pandora to canonical form, (2) confirm whether a track is classical before applying S2p performer-extraction logic. Not integrated into HA or MA. Would be a lightweight server-side lookup (no npm, plain HTTP).
 
 ### Docker / Home Assistant Deployment
 ✅ **Done:** Running as local HA add-on. deploy.sh for fast iteration.

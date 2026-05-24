@@ -9,14 +9,15 @@ const handleHa   = require('./haHandler');
 const handleWiim  = require('./wiimHandler');
 const handleTests    = require('./testsHandler');
 const handleSnapshot = require('./snapshotHandler');
+const handleUsage    = require('./usageHandler');
 
 const publicDir = path.join(__dirname, 'public');
 
 const MIME_TYPES = {
-  '.html': 'text/html',
-  '.js':   'application/javascript',
-  '.jsx':  'application/javascript',
-  '.css':  'text/css',
+  '.html': 'text/html; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.jsx':  'application/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
 };
 
 let _baseSet = false;
@@ -98,6 +99,11 @@ module.exports = function handleRequest(req, res, serverBase) {
   if (req.url === '/tests' || req.url.startsWith('/tests/') ||
       req.url === '/issues' || req.url.startsWith('/issues/')) {
     handleTests(req, res);
+    return;
+  }
+
+  if (req.url === '/usage') {
+    handleUsage(req, res);
     return;
   }
 
