@@ -1449,21 +1449,22 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
               {!spk.reachable ? (
                 <span className="text-slate-600 text-xs">Unreachable{spk.failedCall ? ' (' + spk.failedCall + ')' : ''}</span>
               ) : (
-                <div className="flex items-center gap-1.5 mt-1">
+                <div className="flex items-center gap-2 mt-1">
                   <button onClick={() => onMute(spk.ip)}
-                    className="p-1 bg-slate-700 hover:bg-slate-600 text-white rounded flex-shrink-0">
-                    {spk.muted ? <VolumeIcon size={12}/> : <MuteIcon size={12}/>}
+                    className="w-8 h-8 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded flex-shrink-0">
+                    {spk.muted ? <VolumeIcon size={13}/> : <MuteIcon size={13}/>}
                   </button>
                   <button onClick={() => onVolumeChange(spk.ip, Math.max(0, spk.volume - 1), true)}
-                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-mono flex-shrink-0">−</button>
-                  <input type="range" min="0" max="100" value={spk.volume}
-                    onChange={e => onVolumeChange(spk.ip, parseInt(e.target.value))}
-                    className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer"
-                    style={{ background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 ' + spk.volume + '%, #334155 ' + spk.volume + '%, #334155 100%)' }}
-                  />
+                    className="w-9 h-9 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded text-lg font-mono flex-shrink-0 select-none">−</button>
+                  <div className="flex-1 flex flex-col justify-center gap-0.5">
+                    <div className="h-2 rounded-full overflow-hidden bg-slate-700">
+                      <div className="h-full rounded-full bg-blue-500 transition-all duration-100"
+                        style={{ width: spk.volume + '%' }} />
+                    </div>
+                    <span className="text-slate-400 text-[10px] tabular-nums text-right leading-none">{spk.volume}</span>
+                  </div>
                   <button onClick={() => onVolumeChange(spk.ip, Math.min(100, spk.volume + 1), true)}
-                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-mono flex-shrink-0">+</button>
-                  <span className="text-slate-400 text-xs tabular-nums w-7 text-right flex-shrink-0">{spk.volume}</span>
+                    className="w-9 h-9 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded text-lg font-mono flex-shrink-0 select-none">+</button>
                   {spk.failedCall && <span className="text-rose-400 text-[10px]">!</span>}
                 </div>
               )}
@@ -1834,6 +1835,7 @@ function AllSpeakersView() {
   const [showWholeHouse, setShowWholeHouse] = useState(false);
   const [queueHealthIssues, setQueueHealthIssues] = useState([]);
   const [wiimAlerts, setWiimAlerts] = useState([]); // unused; auto-applied on mount
+  const [volSafetyModal, setVolSafetyModal] = useState(null); // { ip, target, from }
   const [stopRestartByZone, setStopRestartByZone] = useState(() => {
     try { return JSON.parse(localStorage.getItem('stopRestartByZone') || '{}'); } catch { return {}; }
   });
@@ -1842,6 +1844,7 @@ function AllSpeakersView() {
   const groupCardRefs = useRef({});
   const wiimIpOverrides = useRef({}); // speakerName → override IP (persists across fetchSpeakers calls)
   const volumeTimers = useRef({});
+  const volumeBaselines = useRef({}); // ip → { startVol, timer } for rapid-increase safety check
   const deviceIds = useRef({});
   const prevSourceRef = useRef({});          // ip → last confirmed source (for transition detection)
   const speakerDataRef = useRef({});         // always-fresh speakerData for use inside setTimeout callbacks
@@ -2318,8 +2321,7 @@ function AllSpeakersView() {
     setTimeout(async () => { await pollAll(); setTimeout(() => setAnchorGroupIp(masterIp), 200); }, 1200);
   };
 
-  const onVolumeChange = (ip, level, immediate = false) => {
-    if (immediate) recordUsage(speakerData[ip]?.name);
+  const applyVolumeChange = (ip, level, immediate = false) => {
     setSpeakerData(prev => ({ ...prev, [ip]: { ...prev[ip], volume: level } }));
     if (speakerData[ip]?.brand === 'wiim') {
       clearTimeout(volumeTimers.current[ip]);
@@ -2336,6 +2338,38 @@ function AllSpeakersView() {
         apiPost(ip, '/volume', '<volume>' + level + '</volume>');
       }, 250);
     }
+  };
+
+  const onVolumeChange = (ip, level, immediate = false) => {
+    if (immediate) recordUsage(speakerData[ip]?.name);
+    const currentVol = speakerData[ip]?.volume ?? 0;
+
+    // Safety check: only on increases above 50 that jump >10 in a short burst
+    if (level > currentVol && level > 50) {
+      const baseline = volumeBaselines.current[ip];
+      if (!baseline) {
+        const timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
+        volumeBaselines.current[ip] = { startVol: currentVol, timer };
+      } else {
+        clearTimeout(baseline.timer);
+        baseline.timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
+        if (level - baseline.startVol > 10) {
+          setVolSafetyModal({ ip, target: level, from: baseline.startVol });
+          return;
+        }
+      }
+    }
+
+    applyVolumeChange(ip, level, immediate);
+  };
+
+  const confirmVolumeSafety = () => {
+    const { ip, target } = volSafetyModal;
+    if (volumeBaselines.current[ip]) clearTimeout(volumeBaselines.current[ip].timer);
+    const timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
+    volumeBaselines.current[ip] = { startVol: target, timer };
+    setVolSafetyModal(null);
+    applyVolumeChange(ip, target, true);
   };
 
   const onMute = (ip) => {
@@ -2898,6 +2932,33 @@ function AllSpeakersView() {
           onClose={() => setNasBrowser(null)}
           onBeforePlay={() => nasBrowser.queueId ? Promise.resolve() : establishBoseZone(nasBrowser.ip)}
         />
+      )}
+
+      {/* Volume safety confirmation */}
+      {volSafetyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setVolSafetyModal(null)}>
+          <div className="bg-slate-800 border border-slate-600 rounded-2xl p-6 mx-6 max-w-sm w-full shadow-2xl"
+            onClick={e => e.stopPropagation()}>
+            <div className="text-2xl mb-3 text-center">🔊</div>
+            <p className="text-white text-base font-semibold text-center mb-1">Volume is getting loud</p>
+            <p className="text-slate-400 text-sm text-center mb-6">
+              That's +{volSafetyModal.target - volSafetyModal.from} in a few seconds
+              — now at <span className="text-white font-bold">{volSafetyModal.target}</span>.
+              Keep going?
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setVolSafetyModal(null)}
+                className="flex-1 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white font-medium">
+                Cancel
+              </button>
+              <button onClick={confirmVolumeSafety}
+                className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-400 text-white font-semibold">
+                Yes, louder
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
