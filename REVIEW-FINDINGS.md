@@ -116,21 +116,21 @@ hung request hangs endpoint + pollers. **Fix:** `req.setTimeout(10000, () => req
 `public/tests.html` — `esc()` lacks `"` → `&quot;`; note containing quote breaks
 `value="…"` attribute.
 
-### [ ] 13. Duplicate MA now-playing polling
+### [x] 13. Duplicate MA now-playing polling
 `app2.jsx:1971` effect fires per speaker-update (10+× per poll cycle), fetching
 `/ha/queue-now-playing` per AirPlay speaker — on top of dedicated 5s poll at :2058.
 **Fix:** drop fetch from speakerData effect (keep only stale-clear logic); 5s poll suffices.
 
-### [ ] 14. CDN dependency — UI dies offline
+### [x] 14. CDN dependency — UI dies offline
 `index.html`/`app2.html` load React/Babel/Tailwind from unpkg/cdn. Internet outage kills
 fully-local stack. **Fix:** vendor 3 static files into `public/vendor/` (one-time
 download, no npm).
 
-### [ ] 15. Config / doc drift
+### [x] 15. Config / doc drift
 - `haConfig.json` `features.albumDive` — referenced nowhere in code. Stale; remove.
 - CLAUDE.md says Belkin queue `upcc4b73fe2466`; haConfig has `upuuidff970010315bf140af4f0142ff970010`. Update CLAUDE.md.
 
-### [ ] 16. Dead code
+### [x] 16. Dead code
 - `app2.jsx:2222` `syncSpeakerTo` — never called (~35 lines)
 - `app2.jsx` `onMaStop`, `stopRestartEnabled`/`onToggleStopRestart` props + `stopRestartByZone` state — passed to GroupCard, never used
 - `app2.jsx:1824` `loading` never set true — branch unreachable

@@ -1165,7 +1165,7 @@ function HoldButton({ onStep, className, children }) {
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
-function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, removingMembers, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, stopRestartEnabled, onToggleStopRestart, hybridQueues, onStopPlaylistAlbum, onStartPlaylistAlbum }) {
+function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, removingMembers, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, hybridQueues, onStopPlaylistAlbum, onStartPlaylistAlbum }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
   // Use MA track data to fill in art/track/artist when playing via AIRPLAY or AUX redirect
@@ -1845,7 +1845,6 @@ function TVCard({ tvState }) {
 function AllSpeakersView() {
   const [speakerData, setSpeakerData] = useState({});
   const [speakers, setSpeakers] = useState(SPEAKERS);
-  const [loading, setLoading]         = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [nasBrowser, setNasBrowser] = useState(null); // { ip, name }
   const [haConfig, setHaConfig] = useState(null);
@@ -1860,9 +1859,6 @@ function AllSpeakersView() {
   const [queueHealthIssues, setQueueHealthIssues] = useState([]);
   const [wiimAlerts, setWiimAlerts] = useState([]); // unused; auto-applied on mount
   const [volSafetyModal, setVolSafetyModal] = useState(null); // { ip, target, from }
-  const [stopRestartByZone, setStopRestartByZone] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('stopRestartByZone') || '{}'); } catch { return {}; }
-  });
   const [sessionOrder, setSessionOrder] = useState(null); // null = SPEAKERS default; set on load if usage shifts any speaker ≥10 ranks
   const [anchorGroupIp, setAnchorGroupIp] = useState(null);
   const groupCardRefs = useRef({});
@@ -1991,39 +1987,17 @@ function AllSpeakersView() {
     return () => clearInterval(healthTimer);
   }, []);
 
-  // Fetch MA track metadata for AIRPLAY speakers (and AUX-redirect speakers) whenever speaker data updates
+  // Clear stale MA track data when a speaker leaves AIRPLAY/AUX.
+  // Fetching lives in the 5s poll below — this effect runs per speakerData update
+  // (10+× per poll cycle) so it must not fire HTTP requests.
   useEffect(() => {
-    if (!haConfig) return;
-    // Build fromQueue→toQueue map for play redirects
-    const redirectMap = {};
-    (haConfig.playRedirects || []).forEach(r => { redirectMap[r.fromQueue] = r.toQueue; });
-
     Object.values(speakerData).forEach(spk => {
       const src = spk?.nowPlaying?.source;
-      // Clear stale MA track data when speaker is no longer on AIRPLAY/AUX
       if (spk?.name && src !== 'AIRPLAY' && src !== 'AUX') {
         setMaTrackData(prev => { if (!prev[spk.name]) return prev; const next = { ...prev }; delete next[spk.name]; return next; });
-        return;
       }
-      if (!spk?.name || (src !== 'AIRPLAY' && src !== 'AUX')) return;
-      const speakerQueue = haConfig.speakerQueues?.[spk.name];
-      if (!speakerQueue) return;
-      // For AUX: use the redirect target queue. For AIRPLAY: use the individual speaker queue.
-      const queueId = src === 'AUX' ? redirectMap[speakerQueue] : speakerQueue;
-      if (!queueId) return;
-      fetch('/ha/queue-now-playing?queueId=' + queueId)
-        .then(r => r.json())
-        .then(d => {
-          if (d.ok && (d.track || d.art)) {
-            setMaTrackData(prev => ({ ...prev, [spk.name]: d }));
-          } else if (src === 'AUX') {
-            // AUX but nothing playing in MA — clear any stale track data
-            setMaTrackData(prev => { const next = { ...prev }; delete next[spk.name]; return next; });
-          }
-        })
-        .catch(() => {});
     });
-  }, [speakerData, haConfig]);
+  }, [speakerData]);
 
   // Keep speakerDataRef current so setTimeout callbacks always see fresh data
   useEffect(() => { speakerDataRef.current = speakerData; });
@@ -2078,12 +2052,13 @@ function AllSpeakersView() {
     return () => clearInterval(interval);
   }, []);
 
-  // Poll MA track metadata every 5s — faster Pandora song-change detection without full pollAll
+  // Poll MA track metadata every 5s (sole fetcher — runs immediately so metadata
+  // appears right after page load, then every 5s for Pandora song-change detection)
   useEffect(() => {
     if (!haConfig) return;
     const redirectMap = {};
     (haConfig.playRedirects || []).forEach(r => { redirectMap[r.fromQueue] = r.toQueue; });
-    const interval = setInterval(() => {
+    const tick = () => {
       Object.values(speakerDataRef.current).forEach(spk => {
         const src = spk?.nowPlaying?.source;
         if (!spk?.name || (src !== 'AIRPLAY' && src !== 'AUX')) return;
@@ -2096,11 +2071,16 @@ function AllSpeakersView() {
           .then(d => {
             if (d.ok && (d.track || d.art)) {
               setMaTrackData(prev => ({ ...prev, [spk.name]: d }));
+            } else if (src === 'AUX') {
+              // AUX but nothing playing in MA — clear any stale track data
+              setMaTrackData(prev => { if (!prev[spk.name]) return prev; const next = { ...prev }; delete next[spk.name]; return next; });
             }
           })
           .catch(() => {});
       });
-    }, 5000);
+    };
+    tick();
+    const interval = setInterval(tick, 5000);
     return () => clearInterval(interval);
   }, [haConfig]);
 
@@ -2241,41 +2221,6 @@ function AllSpeakersView() {
     const id = xml.querySelector('info')?.getAttribute('deviceID') || null;
     if (id) deviceIds.current[ip] = id;
     return id;
-  };
-
-  const syncSpeakerTo = async (sourceIp, targetIp) => {
-    const targetGroup = groups.find(g => g.speakers.some(s => s.ip === targetIp));
-    if (!targetGroup) {
-      alert('Could not find target speaker group.');
-      return;
-    }
-
-    const masterIp = targetGroup.masterIp || targetIp;
-    const memberIps = Array.from(new Set([...(targetGroup.speakers.map(s => s.ip)), sourceIp]));
-    const masterDeviceId = await getDeviceId(masterIp);
-    if (!masterDeviceId) {
-      alert('Could not determine master device ID for ' + masterIp);
-      return;
-    }
-
-    const memberData = await Promise.all(memberIps.map(async (ip) => {
-      const deviceId = await getDeviceId(ip);
-      return deviceId ? { ip, deviceId } : null;
-    }));
-
-    const missing = memberData.filter(Boolean).length !== memberIps.length;
-    if (missing) {
-      alert('Could not reach one or more speakers required for sync.');
-      return;
-    }
-
-    const membersXml = memberData.map(m => '<member ipaddress="' + m.ip + '">' + m.deviceId + '</member>').join('');
-    const xml = '<?xml version="1.0" encoding="UTF-8"?>' +
-      '<zone master="' + masterDeviceId + '" senderIPAddress="' + masterIp + '">' +
-      membersXml + '</zone>';
-
-    await apiPost(masterIp, '/setZone', xml);
-    setTimeout(pollAll, 1200);
   };
 
   const addSpeakerToGroup = async (masterIp, newSpeakerIp) => {
@@ -2600,18 +2545,6 @@ function AllSpeakersView() {
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1000);
   };
 
-  const onMaStop = (speakerIp) => {
-    const name = speakerData[speakerIp]?.name;
-    recordUsage(name);
-    const queueId = (name && haConfig?.speakerQueues?.[name]) || haConfig?.queues?.airplayGroup;
-    if (!queueId) return;
-    fetch('/ha/stop', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ queueId }),
-    }).then(() => setTimeout(pollAll, 1000));
-  };
-
   const joinToGroup = async (leaderIp, memberIp, leaderName, memberName, queueId) => {
     const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
@@ -2668,14 +2601,6 @@ function AllSpeakersView() {
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);
     return null;
-  };
-
-  const toggleStopRestart = (masterIp) => {
-    setStopRestartByZone(prev => {
-      const next = { ...prev, [masterIp]: prev[masterIp] === false ? true : false };
-      try { localStorage.setItem('stopRestartByZone', JSON.stringify(next)); } catch {}
-      return next;
-    });
   };
 
   const togglePendingMember = (leaderIp, memberIp) => {
@@ -2828,14 +2753,6 @@ function AllSpeakersView() {
     if (activeMasters.length) setTimeout(pollAll, 1500);
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
-        <p className="text-slate-400 text-sm">Scanning speakers...</p>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-4">
       <div className="max-w-2xl mx-auto">
@@ -2914,7 +2831,6 @@ function AllSpeakersView() {
                   groups={groups}
                   onOpenNas={(path, opts) => setNasBrowser({ ip: group.masterIp, name: master?.name || group.masterIp, initialPath: path, ...(opts || {}) })}
                   onPlayNasFolder={playNasFolder}
-                  onMaStop={onMaStop}
                   onMaGroupRemove={onMaGroupRemove}
                   removingMembers={removingMembers}
                   haConfig={haConfig}
@@ -2926,8 +2842,6 @@ function AllSpeakersView() {
                   onEstablishBoseZone={establishBoseZone}
                   onJoinNow={joinSpeakerNow}
                   onAdoptPhantomGroup={adoptPhantomGroup}
-                  stopRestartEnabled={stopRestartByZone[group.masterIp] !== false}
-                  onToggleStopRestart={() => toggleStopRestart(group.masterIp)}
                   hybridQueues={hybridQueues}
                   onStopPlaylistAlbum={stopPlaylistAlbumMode}
                   onStartPlaylistAlbum={startPlaylistAlbumMode}

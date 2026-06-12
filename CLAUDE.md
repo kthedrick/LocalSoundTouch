@@ -70,7 +70,7 @@ The `/ha/group-state` handler uses: "any entity that has OTHER known entities in
 
 ### Bedroom special handling (playRedirects)
 - `speakerQueues["Bose-Bedroom"]` = Bose-Bedroom's own queue (`up04a316bee3e0`) — used as the intercept key
-- `playRedirects` catches this queue on `/ha/play` and redirects to Belkin queue (`upcc4b73fe2466`) + switches Bose to AUX1
+- `playRedirects` catches this queue on every play path (`/ha/play`, playlist/album-once routes — via `applyRedirect` in haHandler) and redirects to Belkin queue (`upuuidff970010315bf140af4f0142ff970010`) + switches Bose to AUX1
 - `speakerEntities["Bose-Bedroom"]` = Belkin entity (`bose_bathroom2`) — used for MA grouping
 - When included in a group, `group-include` also fires `boseSwitchInput` to switch the Bose to AUX1
 
