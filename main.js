@@ -44,7 +44,7 @@ server.listen(PORT, async () => {
 
   await speakerDiscovery.discoverSpeakers();
   setInterval(() => speakerDiscovery.discoverSpeakers().catch(() => {}), 30000);
-  boseWatcher.start(speakerDiscovery.getSpeakers());
+  boseWatcher.start(() => speakerDiscovery.getSpeakers());
   wiimDiscovery.start();
   pandoraTracker.start(getAllQueues, maPost);
   tvWatcher.start(() => speakerDiscovery.getSpeakers());

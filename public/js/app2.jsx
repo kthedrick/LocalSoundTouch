@@ -1140,6 +1140,30 @@ function NowPlayingModal({ queueId, masterIp, art, track, artist, album, positio
   );
 }
 
+// ── HoldButton ────────────────────────────────────────────────────────────────
+// Fires onStep once on press, then auto-repeats while held (400ms delay, 150ms rate).
+// stepRef keeps repeats reading the latest closure so volume steps from fresh state.
+function HoldButton({ onStep, className, children }) {
+  const stepRef = useRef(onStep);
+  stepRef.current = onStep;
+  const timers = useRef({});
+  const stop = () => { clearTimeout(timers.current.delay); clearInterval(timers.current.repeat); };
+  const start = (e) => {
+    e.preventDefault();
+    stepRef.current();
+    timers.current.delay = setTimeout(() => {
+      timers.current.repeat = setInterval(() => stepRef.current(), 150);
+    }, 400);
+  };
+  useEffect(() => stop, []);
+  return (
+    <button onPointerDown={start} onPointerUp={stop} onPointerLeave={stop} onPointerCancel={stop}
+      onContextMenu={e => e.preventDefault()}
+      style={{ touchAction: 'none' }}
+      className={className}>{children}</button>
+  );
+}
+
 // ── GroupCard ─────────────────────────────────────────────────────────────────
 function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, removingMembers, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, onMaStop, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, stopRestartEnabled, onToggleStopRestart, hybridQueues, onStopPlaylistAlbum, onStartPlaylistAlbum }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
@@ -1454,8 +1478,8 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                     className="w-8 h-8 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded flex-shrink-0">
                     {spk.muted ? <VolumeIcon size={13}/> : <MuteIcon size={13}/>}
                   </button>
-                  <button onClick={() => onVolumeChange(spk.ip, Math.max(0, spk.volume - 1), true)}
-                    className="w-9 h-9 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded text-lg font-mono flex-shrink-0 select-none">−</button>
+                  <HoldButton onStep={() => onVolumeChange(spk.ip, Math.max(0, spk.volume - 1), true)}
+                    className="w-9 h-9 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded text-lg font-mono flex-shrink-0 select-none">−</HoldButton>
                   <div className="flex-1 flex flex-col justify-center gap-0.5">
                     <div className="h-2 rounded-full overflow-hidden bg-slate-700">
                       <div className="h-full rounded-full bg-blue-500 transition-all duration-100"
@@ -1463,8 +1487,8 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                     </div>
                     <span className="text-slate-400 text-[10px] tabular-nums text-right leading-none">{spk.volume}</span>
                   </div>
-                  <button onClick={() => onVolumeChange(spk.ip, Math.min(100, spk.volume + 1), true)}
-                    className="w-9 h-9 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded text-lg font-mono flex-shrink-0 select-none">+</button>
+                  <HoldButton onStep={() => onVolumeChange(spk.ip, Math.min(100, spk.volume + 1), true)}
+                    className="w-9 h-9 flex items-center justify-center bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white rounded text-lg font-mono flex-shrink-0 select-none">+</HoldButton>
                   {spk.failedCall && <span className="text-rose-400 text-[10px]">!</span>}
                 </div>
               )}
@@ -2344,12 +2368,17 @@ function AllSpeakersView() {
     if (immediate) recordUsage(speakerData[ip]?.name);
     const currentVol = speakerData[ip]?.volume ?? 0;
 
-    // Safety check: only on increases above 50 that jump >10 in a short burst
+    // Safety check: increases above 50 that jump >10 — either in one shot (slider)
+    // or cumulatively in a short burst (± taps). Baseline = volume when burst began.
     if (level > currentVol && level > 50) {
       const baseline = volumeBaselines.current[ip];
       if (!baseline) {
         const timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
         volumeBaselines.current[ip] = { startVol: currentVol, timer };
+        if (level - currentVol > 10) {
+          setVolSafetyModal({ ip, target: level, from: currentVol });
+          return;
+        }
       } else {
         clearTimeout(baseline.timer);
         baseline.timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
@@ -2679,6 +2708,15 @@ function AllSpeakersView() {
         body: JSON.stringify({ masterName: leaderName, speakerNames: memberNames }),
       }).catch(e => console.warn('[establishGroup] MA join error:', e));
     }
+
+    // Members are now in the group — clear pending selection so stale checked
+    // state doesn't reappear after a later group-remove.
+    setPendingGroups(prev => {
+      if (!prev[leaderIp]) return prev;
+      const next = { ...prev };
+      delete next[leaderIp];
+      return next;
+    });
 
     // Update group display after setup (play functions own the pollAll timing)
     setTimeout(fetchMaGroups, 2000);

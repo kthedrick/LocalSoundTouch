@@ -1,7 +1,14 @@
 const fs   = require('fs');
 const path = require('path');
 
-const DATA_FILE = path.join(__dirname, 'tests.json');
+// /data = HA add-on persistent storage — survives image rebuilds (deploy.sh).
+// Migrate any legacy __dirname copy on first run so existing results aren't lost.
+const DATA_DIR  = fs.existsSync('/data') ? '/data' : __dirname;
+const DATA_FILE = path.join(DATA_DIR, 'tests.json');
+const LEGACY_FILE = path.join(__dirname, 'tests.json');
+if (DATA_DIR !== __dirname && !fs.existsSync(DATA_FILE) && fs.existsSync(LEGACY_FILE)) {
+  try { fs.copyFileSync(LEGACY_FILE, DATA_FILE); console.log('[tests] migrated tests.json to /data'); } catch {}
+}
 
 function migrateItem(item) {
   if ('checked' in item && !('result' in item)) {

@@ -1,7 +1,7 @@
 // HTTP handler for /ha/* routes — Music Assistant integration
 
 const http = require('http');
-const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig, maPost } = require('./maClient');
+const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig, maPost, resolveQueueRedirect } = require('./maClient');
 const pandoraTracker = require('./pandoraTracker');
 
 // Track the station URI most recently played on each queue (for stop→rejoin→restart)
@@ -84,6 +84,20 @@ function readBody(req) {
 function ok(res, data)  { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, ...data })); }
 function err(res, msg)  { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: msg })); }
 
+// Resolve playRedirects for a play request: switches the Bose to the configured input
+// (e.g. Bedroom → AUX1 for the Belkin adapter) and returns the queue that actually
+// receives playback. ALL play paths must route through this, not just /ha/play.
+async function applyRedirect(queueId) {
+  const { queueId: resolved, redirect } = resolveQueueRedirect(queueId);
+  if (redirect?.boseSwitchInput) {
+    const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
+    console.log('[redirect] switching %s to input %s, playing on %s', ip, source, resolved);
+    await boseSwitchInput(ip, source, sourceAccount).catch(e =>
+      console.error('[redirect] boseSwitchInput error:', e.message));
+  }
+  return resolved;
+}
+
 // Switch a Bose speaker to a specific input via its local HTTP API
 function boseSwitchInput(ip, source, sourceAccount = '') {
   const body = `<ContentItem source="${source}" sourceAccount="${sourceAccount}" type="ad" location="" isPresetable="false"/>`;
@@ -99,8 +113,119 @@ function boseSwitchInput(ip, source, sourceAccount = '') {
   });
 }
 
+// Compute active MA speaker groups — shared by /ha/group-state and applyGroupSideEffects.
+// Primary: HA entity group_members ("any entity with OTHER known entities in its
+// group_members is a leader" — do NOT use members[0] === entity_id, it breaks for the
+// Joshua/Rosemary pattern). Supplement: MA players/all synced_to (updates immediately
+// after players/cmd/group while HA entity state lags). Returns [{ leader, members }].
+async function getActiveGroups() {
+  const cfg = getConfig();
+  const entityMap = cfg.speakerEntities || {};
+  const reverseMap = {};
+  for (const [name, entityId] of Object.entries(entityMap)) reverseMap[entityId] = name;
+
+  // Build name↔queue maps for MA player lookup
+  const queueToName = {};
+  for (const [name, queueId] of Object.entries(cfg.speakerQueues || {})) {
+    queueToName[queueId] = name;
+  }
+  // playRedirects targets (e.g. Belkin adapter for Bose-Bedroom) must resolve to speakerName
+  for (const r of (cfg.playRedirects || [])) {
+    if (r.toQueue && r.speakerName) queueToName[r.toQueue] = r.speakerName;
+  }
+
+  // Fetch HA states and MA players in parallel
+  const [allStates, maPlayers] = await Promise.all([
+    haGet('/api/states'),
+    getAllPlayers().catch(() => []),
+  ]);
+
+  // ── Step 1: HA-based group detection ────────────────────────────────────
+  // Catches WiiM speakers and any speaker not in speakerQueues.
+  const entityIds = new Set(Object.values(entityMap));
+  const maStates = Array.isArray(allStates)
+    ? allStates.filter(s => entityIds.has(s.entity_id))
+    : [];
+
+  const groups = [];
+  const seenKeys = new Set();
+  for (const state of maStates) {
+    const members = state.attributes?.group_members || [];
+    const otherMembers = members.filter(id => id !== state.entity_id && reverseMap[id]);
+    if (otherMembers.length === 0) continue;
+    const leaderName = reverseMap[state.entity_id];
+    if (!leaderName) continue;
+    const memberNames = otherMembers.map(id => reverseMap[id]).filter(Boolean);
+    const key = [leaderName, ...memberNames].sort().join('\0');
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    groups.push({ leader: leaderName, members: memberNames });
+  }
+
+  // Drop strict subsets (stale entities with incomplete group_members)
+  const fullSets = groups.map(g => new Set([g.leader, ...g.members]));
+  const filtered = groups.filter((_, i) =>
+    !fullSets.some((other, j) =>
+      j !== i && fullSets[i].size < other.size &&
+      [...fullSets[i]].every(m => other.has(m))
+    )
+  );
+
+  // ── Step 2: MA synced_to supplementation ────────────────────────────────
+  // players/cmd/group updates MA state immediately but HA entity state lags.
+  // For each player that has synced_to set, ensure it appears in the right group.
+  if (Array.isArray(maPlayers)) {
+    for (const player of maPlayers) {
+      const memberName = queueToName[player.player_id];
+      const leaderName = queueToName[player.synced_to];
+      if (!memberName || !leaderName || !player.synced_to) continue;
+
+      // Find existing group that contains the leader or member
+      let group = filtered.find(g =>
+        g.leader === leaderName || g.members.includes(leaderName) ||
+        g.leader === memberName || g.members.includes(memberName)
+      );
+      if (!group) {
+        // No HA group yet — create one from MA data alone
+        group = { leader: leaderName, members: [] };
+        filtered.push(group);
+      }
+      // Ensure leader is correct and member is present
+      if (group.leader !== leaderName && !group.members.includes(leaderName)) {
+        group.members.push(leaderName);
+      }
+      if (group.leader !== memberName && !group.members.includes(memberName)) {
+        group.members.push(memberName);
+      }
+    }
+  }
+
+  // ── Step 3: Leader correction using MA synced_to=null ───────────────────
+  // The player with synced_to=null owns the active queue; promote it to leader.
+  if (Array.isArray(maPlayers)) {
+    for (const group of filtered) {
+      const allNames = new Set([group.leader, ...group.members]);
+      const trueLeader = maPlayers.find(p => {
+        const name = queueToName[p.player_id];
+        return name && allNames.has(name) && p.synced_to === null && p.state !== 'idle';
+      });
+      if (trueLeader) {
+        const trueLeaderName = queueToName[trueLeader.player_id];
+        if (trueLeaderName && trueLeaderName !== group.leader) {
+          group.members = group.members.filter(m => m !== trueLeaderName);
+          group.members.push(group.leader);
+          group.leader = trueLeaderName;
+        }
+      }
+    }
+  }
+
+  return filtered;
+}
+
 // Apply groupSideEffects rules from haConfig after any group change.
-// Checks current HA group state and flips HA switches as configured.
+// Uses getActiveGroups() (HA + MA combined) — the raw HA-only members[0] check
+// misdetected leaders and flipped switches wrongly for some group_members shapes.
 async function applyGroupSideEffects(involvedSpeakers = null) {
   const cfg = getConfig();
   const allRules = cfg.groupSideEffects || [];
@@ -112,22 +237,7 @@ async function applyGroupSideEffects(involvedSpeakers = null) {
   if (rules.length === 0) return;
 
   try {
-    const entityMap = cfg.speakerEntities || {};
-    const reverseMap = {};
-    for (const [name, entityId] of Object.entries(entityMap)) reverseMap[entityId] = name;
-
-    const allStates = await haGet('/api/states');
-    const entityIds = new Set(Object.values(entityMap));
-    const maStates = Array.isArray(allStates) ? allStates.filter(s => entityIds.has(s.entity_id)) : [];
-
-    // Build current groups as sets of speaker names
-    const currentGroups = [];
-    for (const state of maStates) {
-      const members = state.attributes?.group_members || [];
-      if (members[0] !== state.entity_id) continue;
-      const names = members.map(id => reverseMap[id]).filter(Boolean);
-      if (names.length > 1) currentGroups.push(new Set(names));
-    }
+    const currentGroups = (await getActiveGroups()).map(g => new Set([g.leader, ...g.members]));
 
     for (const rule of rules) {
       const grouped = currentGroups.some(g => rule.speakers.every(s => g.has(s)));
@@ -166,6 +276,8 @@ async function handleHa(req, res) {
   if (url === '/ha/clear' && req.method === 'POST') {
     const body = await readBody(req);
     require('./hybridOrchestrator').stop(body.queueId);
+    // Hybrid sessions for redirected speakers are keyed by the redirect target queue
+    require('./hybridOrchestrator').stop(resolveQueueRedirect(body.queueId).queueId);
     try {
       const result = await clearQueue(body.queueId);
       console.log('[ha/clear] queueId=%s result=%j', body.queueId, result);
@@ -424,25 +536,18 @@ async function handleHa(req, res) {
   // POST /ha/play — play a favorite { queueId, uri }
   if (url === '/ha/play' && req.method === 'POST') {
     const body = await readBody(req);
-    require('./hybridOrchestrator').stop(body.queueId);
+    const hybrid = require('./hybridOrchestrator');
+    hybrid.stop(body.queueId);
     try {
-      const cfg = getConfig();
-      let { queueId, uri } = body;
-
-      // Check playRedirects: intercept play for speakers with special routing
-      const redirect = (cfg.playRedirects || []).find(r => r.fromQueue === queueId);
-      if (redirect) {
-        if (redirect.boseSwitchInput) {
-          const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
-          console.log('[ha/play] redirect: switching %s to input %s', ip, source);
-          await boseSwitchInput(ip, source, sourceAccount);
-        }
-        queueId = redirect.toQueue;
-        console.log('[ha/play] redirect: playing on %s instead', queueId);
-      }
+      const { uri } = body;
+      const queueId = await applyRedirect(body.queueId);
+      if (queueId !== body.queueId) hybrid.stop(queueId);
 
       const result = await playMedia(queueId, uri);
+      // Store under both keys so /ha/station-uri works whether the caller knows
+      // about the redirect or not (UI uses the speaker's own queue ID).
       activeStationUris[queueId] = uri;
+      activeStationUris[body.queueId] = uri;
       if (uri && uri.startsWith('pandora://')) {
         pandoraTracker.setActiveStation(queueId, body.name || uri);
       }
@@ -558,7 +663,7 @@ async function handleHa(req, res) {
   // POST /ha/pandora-play-playlist — play a Pandora station playlist shuffled { stationName, queueId }
   if (url === '/ha/pandora-play-playlist' && req.method === 'POST') {
     const body = await readBody(req);
-    const { stationName, queueId } = body;
+    const { stationName } = body;
     const data = pandoraTracker.loadData();
     const station = data[stationName];
     if (!station || !station.tracks.length) {
@@ -566,6 +671,7 @@ async function handleHa(req, res) {
       return;
     }
     try {
+      const queueId = await applyRedirect(body.queueId);
       if (station.maPlaylistId) {
         // Play the MA playlist directly (shuffle is handled by MA)
         await playMedia(queueId, `library://playlist/${station.maPlaylistId}`);
@@ -587,12 +693,14 @@ async function handleHa(req, res) {
   // GET /ha/station-uri?queueId=... — return the station URI last played on a queue (for restart after group join)
   if (url.startsWith('/ha/station-uri') && req.method === 'GET') {
     const queueId = new URL('http://x' + url).searchParams.get('queueId');
-    let uri = activeStationUris[queueId] || null;
+    // Redirected speakers (Bedroom): playback lives on the redirect target queue
+    const resolved = resolveQueueRedirect(queueId).queueId;
+    let uri = activeStationUris[queueId] || activeStationUris[resolved] || null;
     // Fallback: read URI from the current queue item (survives server restarts)
     if (!uri) {
       try {
         const queues = await getAllQueues();
-        const queue  = (queues || []).find(q => q.queue_id === queueId);
+        const queue  = (queues || []).find(q => q.queue_id === resolved);
         const itemUri = queue?.current_item?.media_item?.uri || null;
         if (itemUri) uri = itemUri;
       } catch {}
@@ -771,115 +879,10 @@ async function handleHa(req, res) {
     return;
   }
 
-  // GET /ha/group-state — return active MA speaker groups
-  // Primary: MA players/all synced_to field (updates immediately after players/cmd/group).
-  // Supplementary: HA entity group_members (catches WiiM and other non-speakerQueues speakers).
+  // GET /ha/group-state — return active MA speaker groups (see getActiveGroups)
   if (url === '/ha/group-state' && req.method === 'GET') {
     try {
-      const cfg = getConfig();
-      const entityMap = cfg.speakerEntities || {};
-      const reverseMap = {};
-      for (const [name, entityId] of Object.entries(entityMap)) reverseMap[entityId] = name;
-
-      // Build name↔queue maps for MA player lookup
-      const nameToQueue = {};
-      const queueToName = {};
-      for (const [name, queueId] of Object.entries(cfg.speakerQueues || {})) {
-        nameToQueue[name] = queueId;
-        queueToName[queueId] = name;
-      }
-      // playRedirects targets (e.g. Belkin adapter for Bose-Bedroom) must resolve to speakerName
-      for (const r of (cfg.playRedirects || [])) {
-        if (r.toQueue && r.speakerName) queueToName[r.toQueue] = r.speakerName;
-      }
-
-      // Fetch HA states and MA players in parallel
-      const [allStates, maPlayers] = await Promise.all([
-        haGet('/api/states'),
-        getAllPlayers().catch(() => []),
-      ]);
-
-      // ── Step 1: HA-based group detection ────────────────────────────────────
-      // Catches WiiM speakers and any speaker not in speakerQueues.
-      const entityIds = new Set(Object.values(entityMap));
-      const maStates = Array.isArray(allStates)
-        ? allStates.filter(s => entityIds.has(s.entity_id))
-        : [];
-
-      const groups = [];
-      const seenKeys = new Set();
-      for (const state of maStates) {
-        const members = state.attributes?.group_members || [];
-        const otherMembers = members.filter(id => id !== state.entity_id && reverseMap[id]);
-        if (otherMembers.length === 0) continue;
-        const leaderName = reverseMap[state.entity_id];
-        if (!leaderName) continue;
-        const memberNames = otherMembers.map(id => reverseMap[id]).filter(Boolean);
-        const key = [leaderName, ...memberNames].sort().join('\0');
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        groups.push({ leader: leaderName, members: memberNames });
-      }
-
-      // Drop strict subsets (stale entities with incomplete group_members)
-      const fullSets = groups.map(g => new Set([g.leader, ...g.members]));
-      const filtered = groups.filter((_, i) =>
-        !fullSets.some((other, j) =>
-          j !== i && fullSets[i].size < other.size &&
-          [...fullSets[i]].every(m => other.has(m))
-        )
-      );
-
-      // ── Step 2: MA synced_to supplementation ────────────────────────────────
-      // players/cmd/group updates MA state immediately but HA entity state lags.
-      // For each player that has synced_to set, ensure it appears in the right group.
-      if (Array.isArray(maPlayers)) {
-        for (const player of maPlayers) {
-          const memberName = queueToName[player.player_id];
-          const leaderName = queueToName[player.synced_to];
-          if (!memberName || !leaderName || !player.synced_to) continue;
-
-          // Find existing group that contains the leader or member
-          let group = filtered.find(g =>
-            g.leader === leaderName || g.members.includes(leaderName) ||
-            g.leader === memberName || g.members.includes(memberName)
-          );
-          if (!group) {
-            // No HA group yet — create one from MA data alone
-            group = { leader: leaderName, members: [] };
-            filtered.push(group);
-          }
-          // Ensure leader is correct and member is present
-          if (group.leader !== leaderName && !group.members.includes(leaderName)) {
-            group.members.push(leaderName);
-          }
-          if (group.leader !== memberName && !group.members.includes(memberName)) {
-            group.members.push(memberName);
-          }
-        }
-      }
-
-      // ── Step 3: Leader correction using MA synced_to=null ───────────────────
-      // The player with synced_to=null owns the active queue; promote it to leader.
-      if (Array.isArray(maPlayers)) {
-        for (const group of filtered) {
-          const allNames = new Set([group.leader, ...group.members]);
-          const trueLeader = maPlayers.find(p => {
-            const name = queueToName[p.player_id];
-            return name && allNames.has(name) && p.synced_to === null && p.state !== 'idle';
-          });
-          if (trueLeader) {
-            const trueLeaderName = queueToName[trueLeader.player_id];
-            if (trueLeaderName && trueLeaderName !== group.leader) {
-              group.members = group.members.filter(m => m !== trueLeaderName);
-              group.members.push(group.leader);
-              group.leader = trueLeaderName;
-            }
-          }
-        }
-      }
-
-      ok(res, { groups: filtered });
+      ok(res, { groups: await getActiveGroups() });
     } catch (e) { err(res, e.message); }
     return;
   }
@@ -1056,7 +1059,15 @@ async function handleHa(req, res) {
   if (url === '/ha/hybrid-mode') {
     if (req.method === 'GET') {
       const hybrid = require('./hybridOrchestrator');
-      ok(res, { queues: hybrid.getAll() });
+      const queues = hybrid.getAll();
+      // Mirror redirected sessions under the speaker's own queue ID so the UI
+      // (which only knows speakerQueues) sees album-mode state for e.g. Bedroom.
+      for (const r of (getConfig().playRedirects || [])) {
+        if (r.fromQueue && r.toQueue && queues[r.toQueue] && !queues[r.fromQueue]) {
+          queues[r.fromQueue] = queues[r.toQueue];
+        }
+      }
+      ok(res, { queues });
       return;
     }
     if (req.method === 'POST') {
@@ -1065,6 +1076,7 @@ async function handleHa(req, res) {
       if (!queueId) { err(res, 'queueId required'); return; }
       const hybrid = require('./hybridOrchestrator');
       hybrid.stop(queueId);
+      hybrid.stop(resolveQueueRedirect(queueId).queueId);
       ok(res, {});
       return;
     }
@@ -1090,9 +1102,11 @@ async function handleHa(req, res) {
   // POST /ha/album-once { queueId, stationUri } — play Apple Music album for current Pandora track, then restart station
   if (url === '/ha/album-once' && req.method === 'POST') {
     const body = await readBody(req);
-    const { queueId, stationUri, stationName } = body;
-    if (!queueId || !stationUri) { err(res, 'queueId and stationUri required'); return; }
+    const { stationUri, stationName } = body;
+    if (!body.queueId || !stationUri) { err(res, 'queueId and stationUri required'); return; }
     try {
+      // Resolve redirect first — the current Pandora track lives on the redirect queue
+      const queueId = await applyRedirect(body.queueId);
       const hybrid = require('./hybridOrchestrator');
       const result = await hybrid.startAlbumOnce(queueId, stationUri, stationName);
       if (result.error) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: result.error })); return; }
@@ -1104,8 +1118,8 @@ async function handleHa(req, res) {
   // POST /ha/play-playlist-album { stationName, queueId } — play a local playlist in album mode
   if (url === '/ha/play-playlist-album' && req.method === 'POST') {
     const body = await readBody(req);
-    const { stationName, queueId } = body;
-    if (!stationName || !queueId) { err(res, 'stationName and queueId required'); return; }
+    const { stationName } = body;
+    if (!stationName || !body.queueId) { err(res, 'stationName and queueId required'); return; }
     const data = pandoraTracker.loadData();
     const station = data[stationName];
     if (!station || !station.tracks.length) {
@@ -1119,6 +1133,7 @@ async function handleHa(req, res) {
     }
     const shuffled = [...appleUriTracks].sort(() => Math.random() - 0.5);
     try {
+      const queueId = await applyRedirect(body.queueId);
       const hybrid = require('./hybridOrchestrator');
       const result = await hybrid.startPlaylist(queueId, shuffled, stationName);
       if (result.error) { err(res, result.error); return; }

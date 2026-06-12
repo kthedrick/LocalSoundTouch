@@ -466,92 +466,6 @@ async function fetchAlbum(queueId) {
   console.log('[hybrid] pre-fetching album for "%s" by "%s"', trackTitle, trackArtist);
 
   try {
-    let albumItemId = null, albumProviderDomain = 'apple_music', albumName = trackAlbum;
-
-    const normalizedArtist = (trackArtist || '').toLowerCase().trim();
-
-    // Strategy 1: search for the exact Apple Music track → get album from track's own metadata.
-    // URI match is authoritative. Name match requires the artist to also match.
-    const trackSearch = await maPost('music/search', {
-      search_query: [trackTitle, trackArtist].filter(Boolean).join(' '),
-      media_types: ['track'], limit: 10,
-    });
-    const appleTrack = (trackSearch?.tracks || []).find(t => {
-      const isApple = (t.provider_mappings || []).some(pm => (pm.provider_domain || '').startsWith('apple_music'));
-      if (!isApple) return false;
-      // Exact URI match — fully trusted
-      if (trackAppleUri && t.uri === trackAppleUri) return true;
-      // Name match: require artist to also match to avoid wrong versions
-      const nameMatch = (t.name || '').toLowerCase().trim() === (trackTitle || '').toLowerCase().trim();
-      if (!nameMatch) return false;
-      if (!normalizedArtist) return true;
-      const tArtist = ((t.artists || [])[0]?.name || '').toLowerCase().trim();
-      return tArtist.includes(normalizedArtist) || normalizedArtist.includes(tArtist);
-    });
-    if (appleTrack) {
-      const albumField = appleTrack.album || appleTrack.media_item?.album;
-      if (albumField?.item_id) {
-        albumItemId = String(albumField.item_id);
-        albumName   = albumField.name || albumName;
-        albumProviderDomain = (appleTrack.provider_mappings || []).find(pm =>
-          (pm.provider_domain || '').startsWith('apple_music')
-        )?.provider_domain || 'apple_music';
-        console.log('[hybrid] S1 found track → album "%s" id=%s', albumName, albumItemId);
-      }
-    }
-
-    // Strategy 2: album name + artist search — requires BOTH artist AND name match, no fallback.
-    if (!albumItemId && trackAlbum) {
-      const normalizedAlbum = (trackAlbum || '').toLowerCase().trim();
-      const albumSearch = await maPost('music/search', {
-        search_query: [trackAlbum, trackArtist].filter(Boolean).join(' '),
-        media_types: ['album'], limit: 10,
-      });
-      for (const album of (albumSearch?.albums || [])) {
-        const isApple = (album.provider_mappings || []).some(pm => (pm.provider_domain || '').startsWith('apple_music'));
-        if (!isApple) continue;
-        const aArtist = (album.artists?.[0]?.name || '').toLowerCase().trim();
-        const aName   = (album.name || '').toLowerCase().trim();
-        const artistMatch = normalizedArtist && (aArtist.includes(normalizedArtist) || normalizedArtist.includes(aArtist));
-        const nameMatch   = normalizedAlbum  && aName.includes(normalizedAlbum);
-        if (artistMatch && nameMatch) {
-          albumItemId = String(album.item_id);
-          albumName   = album.name;
-          albumProviderDomain = (album.provider_mappings || []).find(pm =>
-            (pm.provider_domain || '').startsWith('apple_music')
-          )?.provider_domain || 'apple_music';
-          console.log('[hybrid] S2 found album "%s" id=%s', albumName, albumItemId);
-          break;
-        }
-      }
-      if (albumItemId) console.log('[hybrid] album "%s" id=%s via name search', albumName, albumItemId);
-    }
-
-    // Strategy 2b: artist-only album search — last resort when track has no album metadata.
-    // Finds a proper (non-single) album by the same artist. Not track-specific but far better
-    // than "no album found" for artists like 2CELLOS where MA returns the single version.
-    if (!albumItemId && normalizedArtist) {
-      const artistSearch = await maPost('music/search', {
-        search_query: trackArtist,
-        media_types: ['album'], limit: 20,
-      });
-      for (const album of (artistSearch?.albums || [])) {
-        const isApple = (album.provider_mappings || []).some(pm => (pm.provider_domain || '').startsWith('apple_music'));
-        if (!isApple) continue;
-        const aArtist = (album.artists?.[0]?.name || '').toLowerCase().trim();
-        if (!artistMatches(aArtist, normalizedArtist, aName)) continue;
-        const aName = (album.name || '').toLowerCase();
-        if (aName.endsWith('- single') || aName.endsWith('- ep')) continue;
-        albumItemId = String(album.item_id);
-        albumName   = album.name;
-        albumProviderDomain = (album.provider_mappings || []).find(pm =>
-          (pm.provider_domain || '').startsWith('apple_music')
-        )?.provider_domain || 'apple_music';
-        console.log('[hybrid] S2b found artist album "%s" id=%s', albumName, albumItemId);
-        break;
-      }
-    }
-
     const noAlbum = async (reason) => {
       console.log('[hybrid] %s for "%s" by "%s" — skipping album', reason, trackTitle, trackArtist);
       if (activeQueues[queueId] !== s) return;
@@ -560,28 +474,10 @@ async function fetchAlbum(queueId) {
       if (s.trackEndedDetected) await advanceToNextTrack(queueId);
     };
 
-    if (!albumItemId) { await noAlbum('no album found'); return; }
-
-    const albumTracks = await maPost('music/albums/album_tracks', {
-      item_id: albumItemId,
-      provider_instance_id_or_domain: albumProviderDomain,
-      in_library_only: false,
-    });
-
-    if (!Array.isArray(albumTracks) || !albumTracks.length) { await noAlbum('no tracks for album id=' + albumItemId); return; }
-
-    const sorted = albumTracks.sort((a, b) => {
-      if (a.disc_number !== b.disc_number) return (a.disc_number || 0) - (b.disc_number || 0);
-      return (a.track_number || 0) - (b.track_number || 0);
-    });
-
-    // If seed track is track 1: start from track 2 to avoid replaying it.
-    // If seed is a deeper cut: play the whole album (it's ok if seed repeats later).
-    const normalizedTitle = (trackTitle || '').toLowerCase().trim();
-    const seedIdx = sorted.findIndex(t => (t.name || '').toLowerCase().trim() === normalizedTitle);
-    const tracksToPlay = seedIdx === 0 ? sorted.slice(1) : sorted;
-
-    if (!tracksToPlay.length) { await noAlbum('all tracks filtered'); return; }
+    // Shared S1/S2p/S2/S2b search — returns sorted tracks with seed-track handling applied
+    const found = await findAlbumTracks(trackTitle, trackArtist, trackAlbum, trackAppleUri);
+    if (!found) { await noAlbum('no album found'); return; }
+    const { albumName, tracks: tracksToPlay } = found;
     if (activeQueues[queueId] !== s) return;
 
     s.pendingAlbumTracks = tracksToPlay;

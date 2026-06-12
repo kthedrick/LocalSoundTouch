@@ -22,6 +22,15 @@ function getConfig() {
 // Reload config (call after haConfig.json is updated at runtime)
 function reloadConfig() { _config = null; }
 
+// Resolve playRedirects: some speakers (e.g. Bose-Bedroom) can't receive their own
+// queue's audio — playback must go to a redirect target queue (e.g. Belkin adapter).
+// Every code path that starts playback on a queue must resolve through this first.
+function resolveQueueRedirect(queueId) {
+  const cfg = getConfig();
+  const redirect = (cfg.playRedirects || []).find(r => r.fromQueue === queueId);
+  return redirect ? { queueId: redirect.toQueue, redirect } : { queueId, redirect: null };
+}
+
 async function maPost(command, args) {
   const cfg = getConfig();
   if (!cfg.maToken || cfg.maToken === 'YOUR_MA_TOKEN_HERE') {
@@ -73,4 +82,4 @@ const prevTrack    = (queueId)                       => maPost('player_queues/pr
 const getAllQueues  = ()                              => maPost('player_queues/all',           {});
 const playMedia    = (queueId, uri)                  => maPost('player_queues/play_media',    { queue_id: queueId, media: uri, option: 'play' });
 
-module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, reloadConfig, getConfig };
+module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, reloadConfig, getConfig, resolveQueueRedirect };

@@ -7,7 +7,7 @@ Status legend: `[ ]` open · `[x]` fixed · `[~]` won't fix / deferred.
 
 ## P1 — Bugs, fix first
 
-### [ ] 1. TDZ crash kills S2b album fallback
+### [x] 1. TDZ crash kills S2b album fallback
 **File:** `hybridOrchestrator.js:542-543` (inside `fetchAlbum`, Strategy 2b)
 ```js
 if (!artistMatches(aArtist, normalizedArtist, aName)) continue;  // 542 — aName used
@@ -21,7 +21,7 @@ as "no album found", skipped. Artist-fallback albums never play in playlist albu
 `fetchAlbum`'s inline S1/S2/S2b (~120 lines) and call `findAlbumTracks` — also gains S2p
 performer strategy `fetchAlbum` lacks. Minimal: move `aName` declaration above use.
 
-### [ ] 2. Test/usage data wiped every deploy
+### [x] 2. Test/usage data wiped every deploy
 **Files:** `testsHandler.js:4`, `usageHandler.js:4`
 Both write to `__dirname` = `/app` inside container. `ha apps rebuild` discards container
 FS → tests.json results, fail snapshots, usage.json counts (drives speaker card ordering)
@@ -33,7 +33,7 @@ const DATA_DIR = fs.existsSync('/data') ? '/data' : __dirname;
 ```
 One-time migration: copy current `/app/tests.json` → `/data/tests.json` on Pi before next rebuild.
 
-### [ ] 3. applyGroupSideEffects uses forbidden leader check
+### [x] 3. applyGroupSideEffects uses forbidden leader check
 **File:** `haHandler.js:127`
 `if (members[0] !== state.entity_id) continue` — exact pattern CLAUDE.md forbids
 (breaks Joshua/Rosemary group_members shape). Leader listing only members → skipped;
@@ -46,7 +46,7 @@ forced MA supplementation in `/ha/group-state`.
 group_members is leader" + MA `synced_to` supplement). Extract shared `getActiveGroups()`
 helper; both call sites use it.
 
-### [ ] 4. playRedirects enforced only in /ha/play — Bedroom playback paths broken
+### [x] 4. playRedirects enforced only in /ha/play — Bedroom playback paths broken
 **Files:** `haHandler.js` (`/ha/pandora-play-playlist` ~571, `/ha/play-playlist-album`,
 `/ha/album-once`, `/ha/station-uri` ~588), `hybridOrchestrator.js` (`startPlaylist`,
 `advanceToNextTrack`, `playAlbum`, `startAlbumOnce`)
@@ -59,7 +59,7 @@ UI queries original queue → always "No station URI — play Pandora first".
 (+ `boseSwitchInput` side effect); every play path routes through it. `/ha/station-uri`
 checks both original and redirect queue keys.
 
-### [ ] 5. Volume safety check misses first jump (UNCOMMITTED work)
+### [x] 5. Volume safety check misses first jump (UNCOMMITTED work)
 **File:** `public/js/app2.jsx:2343-2364` (`onVolumeChange`)
 No-baseline path only creates baseline then applies unchecked — single 40→90 slider jump
 (SoundSettingsModal) passes silently; modal then fires later on innocent +1 nudge
@@ -72,7 +72,7 @@ immediately (treat currentVol as baseline).
 
 ## P2 — Bugs, fix soon
 
-### [ ] 6. boseWatcher bound to boot-time IP list forever
+### [x] 6. boseWatcher bound to boot-time IP list forever
 **File:** `boseWatcher.js:360` (`start`)
 Runs once with startup discovery. Speaker offline at boot → never watched. DHCP renumber
 → WS reconnect-loops dead IP, poll spams dead IP, `lastSource` stale (feeds
@@ -81,13 +81,13 @@ Runs once with startup discovery. Speaker offline at boot → never watched. DHC
 watcher on change, start watcher for newly seen speakers.
 Also: header comment says "poll every 8s"; `POLL_MS = 60000` — fix comment.
 
-### [ ] 7. pendingGroups never cleared after establishGroup
+### [x] 7. pendingGroups never cleared after establishGroup
 **File:** `public/js/app2.jsx:2664-2685`
 Stale checked-state survives join; member later removed from group reappears pre-checked;
 next tap silently un-pends instead of joining.
 **Fix:** clear `pendingGroups[leaderIp]` after successful group-include.
 
-### [ ] 8. GroupCard volume ±1-taps only (UNCOMMITTED — confirm intent)
+### [x] 8. GroupCard volume ±1-taps only (UNCOMMITTED — confirm intent)
 **File:** `public/js/app2.jsx:1452-1469`
 Slider replaced with display-only bar. +30 volume = 30 taps = 30 immediate POSTs; safety
 modal interrupts every +11 above 50 (re-arms after each confirm). If kid-proofing

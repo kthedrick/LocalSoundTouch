@@ -1,7 +1,9 @@
 // boseWatcher.js — Bose speaker watcher with WebSocket + polling fallback
 //
 // Primary: WebSocket on port 8080 — fires instantly on nowSelectionUpdated (preset press)
-// Fallback: HTTP poll every 8s — catches INVALID_SOURCE if WebSocket fails
+// Fallback: HTTP poll every 60s — catches INVALID_SOURCE if WebSocket fails
+// Watchers re-sync against discovery every 60s: speakers that appear after boot get
+// watched, and DHCP IP changes restart the watcher on the new IP (keyed by name).
 //
 // haConfig.json:
 //   "presetActions": {
@@ -130,11 +132,13 @@ function handleWsEvent(ip, name, xml) {
 
 function watchSpeakerWs(ip, name) {
   let buf = Buffer.alloc(0), handshakeDone = false, reconnectTimer;
+  let stopped = false, socket = null;
 
   function connect() {
+    if (stopped) return;
     buf = Buffer.alloc(0); handshakeDone = false;
 
-    const socket = net.createConnection({ host: ip, port: WS_PORT }, () => {
+    socket = net.createConnection({ host: ip, port: WS_PORT }, () => {
       const key  = crypto.randomBytes(16).toString('base64');
       const hs   = [
         'GET / HTTP/1.1',
@@ -179,11 +183,16 @@ function watchSpeakerWs(ip, name) {
     socket.on('close', () => {
       if (handshakeDone) console.log(`[boseWatcher] ${name}: WS disconnected`);
       clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connect, RECONNECT_MS);
+      if (!stopped) reconnectTimer = setTimeout(connect, RECONNECT_MS);
     });
   }
 
   connect();
+  return () => {
+    stopped = true;
+    clearTimeout(reconnectTimer);
+    try { socket?.destroy(); } catch (_) {}
+  };
 }
 
 // ── Polling fallback ──────────────────────────────────────────────────────────
@@ -291,7 +300,7 @@ function pollSpeaker(ip, name) {
   let phantomCleared  = false;
   let tvReleased      = false;  // reset only when source returns to AIRPLAY
 
-  setInterval(() => {
+  const intervalId = setInterval(() => {
     const req = http.request(
       { hostname: ip, port: 8090, path: '/now_playing', method: 'GET', timeout: 3000 },
       (res) => {
@@ -353,16 +362,42 @@ function pollSpeaker(ip, name) {
     req.on('timeout', () => req.destroy());
     req.end();
   }, POLL_MS);
+
+  return () => clearInterval(intervalId);
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-function start(speakers) {
-  for (const { ip, name } of speakers) {
-    watchSpeakerWs(ip, name);
-    pollSpeaker(ip, name);
+const watchers = {}; // name → { ip, stopWs, stopPoll }
+
+// Diff discovered speakers against active watchers: start new, restart on IP change.
+// Never stops a watcher for a name absent from the list — discovery results can be
+// transiently empty and a dormant reconnect loop is harmless.
+function syncWatchers(speakers) {
+  for (const { ip, name } of (speakers || [])) {
+    const w = watchers[name];
+    if (w && w.ip === ip) continue;
+    if (w) {
+      console.log(`[boseWatcher] ${name}: IP changed ${w.ip} → ${ip}, restarting watcher`);
+      w.stopWs();
+      w.stopPoll();
+    } else {
+      console.log(`[boseWatcher] ${name}: watching at ${ip}`);
+    }
+    watchers[name] = {
+      ip,
+      stopWs:   watchSpeakerWs(ip, name),
+      stopPoll: pollSpeaker(ip, name),
+    };
   }
-  console.log(`[boseWatcher] watching ${speakers.length} speakers (WS + poll)`);
+}
+
+function start(getSpeakers) {
+  syncWatchers(getSpeakers());
+  setInterval(() => {
+    try { syncWatchers(getSpeakers()); } catch (e) { console.error('[boseWatcher] sync error:', e.message); }
+  }, 60000);
+  console.log(`[boseWatcher] watching ${Object.keys(watchers).length} speakers (WS + poll, resync 60s)`);
 }
 
 module.exports = { start, getSources: () => lastSource };
