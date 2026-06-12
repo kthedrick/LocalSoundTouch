@@ -22,6 +22,12 @@ const DATA_FILE = path.join(DATA_DIR, 'pandoraPlaylists.json');
 const trackState = {};
 const seenQueues = new Set();
 
+// stationName → timestamp of last failed MA playlist lookup. In-memory only, so a
+// lookup that failed (no playlist yet / transient error) retries hourly and always
+// after a server restart — a playlist created later in the MA UI gets picked up.
+const playlistLookupFailedAt = {};
+const LOOKUP_RETRY_MS = 60 * 60 * 1000;
+
 function loadData() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { return {}; }
 }
@@ -95,14 +101,21 @@ async function addToPlaylist(maPost, stationName, artist, title, album) {
     }
   }
 
-  // Look up MA playlist by station name (null = not yet looked up, false = looked up, not found)
-  if (station.maPlaylistId === null) {
-    const id = await findMAPlaylistId(maPost, stationName);
-    station.maPlaylistId = id || false;
-    if (id) {
-      console.log('[pandoraTracker] found MA playlist "%s" → id=%s', stationName, id);
-    } else {
-      console.log('[pandoraTracker] no MA playlist named "%s" — create one in the MA UI to enable sync', stationName);
+  // Look up MA playlist by station name. null/false = not found yet — retry with an
+  // hourly cooldown (never store a permanent "not found": the user may create the
+  // playlist in the MA UI later, and transient search errors must not stick).
+  if (!station.maPlaylistId) {
+    const lastFail = playlistLookupFailedAt[stationName] || 0;
+    if (Date.now() - lastFail > LOOKUP_RETRY_MS) {
+      const id = await findMAPlaylistId(maPost, stationName);
+      if (id) {
+        station.maPlaylistId = id;
+        delete playlistLookupFailedAt[stationName];
+        console.log('[pandoraTracker] found MA playlist "%s" → id=%s', stationName, id);
+      } else {
+        playlistLookupFailedAt[stationName] = Date.now();
+        console.log('[pandoraTracker] no MA playlist named "%s" — create one in the MA UI to enable sync (retry in 1h)', stationName);
+      }
     }
   }
 

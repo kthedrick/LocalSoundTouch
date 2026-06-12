@@ -35,6 +35,7 @@ function haGet(path) {
         catch (e) { resolve(data); }
       });
     });
+    req.setTimeout(10000, () => req.destroy(new Error('HA GET timeout: ' + path)));
     req.on('error', reject);
     req.end();
   });
@@ -64,6 +65,7 @@ function haServicePost(path, body) {
         catch (e) { resolve({ status: res.statusCode, body: data }); }
       });
     });
+    req.setTimeout(15000, () => req.destroy(new Error('HA service timeout: ' + path)));
     req.on('error', reject);
     req.write(bodyStr);
     req.end();
@@ -108,6 +110,7 @@ function boseSwitchInput(ip, source, sourceAccount = '') {
     }, (res) => {
       let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
     });
+    req.setTimeout(5000, () => req.destroy(new Error('Bose /select timeout: ' + ip)));
     req.on('error', reject);
     req.write(body); req.end();
   });

@@ -146,7 +146,9 @@ const MIME_FOR_EXT = {
 };
 
 function contentTypeFromUrl(url) {
-  const m = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+  // Extension may sit inside a query param (/nas/stream?path=...song.flac&_t=123),
+  // so allow ?, & or end-of-string after it — the _t cache-buster appends with &.
+  const m = url.match(/\.([a-z0-9]+)(?:[?&]|$)/i);
   return m ? (MIME_FOR_EXT['.' + m[1].toLowerCase()] || 'audio/mpeg') : 'audio/mpeg';
 }
 

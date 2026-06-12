@@ -59,6 +59,7 @@ async function maPost(command, args) {
         catch (e) { resolve(data); }
       });
     });
+    req.setTimeout(10000, () => req.destroy(new Error('MA request timeout: ' + command)));
     req.on('error', reject);
     req.write(body);
     req.end();

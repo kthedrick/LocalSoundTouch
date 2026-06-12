@@ -97,22 +97,22 @@ intentional, keep — but add hold-to-repeat auto-increment or tap-position-on-b
 
 ## P3 — Minor / latent
 
-### [ ] 9. Cache-buster breaks MIME detection
+### [x] 9. Cache-buster breaks MIME detection
 `upnpHandler.js:264` — `&_t=` appended to `/nas/stream?path=…` → `contentTypeFromUrl`
 regex (needs `.ext` before `?` or end) misses → DIDL protocolInfo always `audio/mpeg`
 for FLAC/M4A. Latent — speakers trust HTTP Content-Type (nasHandler sets correctly).
 **Fix:** strip query before extension match, or pass original URL for MIME.
 
-### [ ] 10. Pandora playlist lookup miss stored permanently
+### [x] 10. Pandora playlist lookup miss stored permanently
 `pandoraTracker.js:99-107` — lookup miss or transient search error → `maPlaylistId=false`
 forever; MA playlist created later never syncs. **Fix:** retry `false` on server restart
 or every N days; don't persist `false` on caught error.
 
-### [ ] 11. No timeouts on MA/HA HTTP requests
+### [x] 11. No timeouts on MA/HA HTTP requests
 `maClient.js` `maPost`, `haHandler.js` `haGet`/`haServicePost`, `tvWatcher.js` `haGet` —
 hung request hangs endpoint + pollers. **Fix:** `req.setTimeout(10000, () => req.destroy(...))`.
 
-### [ ] 12. tests.html esc() misses quotes
+### [x] 12. tests.html esc() misses quotes
 `public/tests.html` — `esc()` lacks `"` → `&quot;`; note containing quote breaks
 `value="…"` attribute.
 

@@ -18,6 +18,8 @@ function haGet(path) {
       res.on('data', c => { data += c; });
       res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
     });
+    // destroy(err) so the 'error' handler fires and the promise resolves null
+    req.setTimeout(8000, () => req.destroy(new Error('timeout')));
     req.on('error', () => resolve(null));
     req.end();
   });
