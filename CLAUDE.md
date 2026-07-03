@@ -175,6 +175,7 @@ Flow in `joinSpeakerNow` / `doStopJoinRestart` (app2.jsx):
 - **haConfig.json**: git-ignored, deployed separately via SSH heredoc
 - **deploy.sh**: uses port 22222 for SSH; CRLF fix applied automatically
 - **MA token vs HA token**: these are separate auth systems; MA token won't work for HA REST API
+- **Bose mute**: `POST /volume` with `<volume>N<muteenabled>bool</muteenabled></volume>` (mixed-content XML) works on our units despite not matching official docs — confirmed 2026-07. Don't "fix" to `/key` MUTE.
 
 ---
 
