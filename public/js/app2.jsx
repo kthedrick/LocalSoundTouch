@@ -1,5 +1,10 @@
 const { useMemo } = React;
 
+// Window after a user volume/mute change during which polls keep the optimistic local
+// value instead of the device reading (covers send debounce + device-report lag, and the
+// play-path polls scheduled up to 6s out that otherwise snap the slider back).
+const VOLUME_GUARD_MS = 8000;
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 async function apiGet(ip, endpoint) {
   try {
@@ -1858,22 +1863,25 @@ function AllSpeakersView() {
   const [showWholeHouse, setShowWholeHouse] = useState(false);
   const [queueHealthIssues, setQueueHealthIssues] = useState([]);
   const [wiimAlerts, setWiimAlerts] = useState([]); // unused; auto-applied on mount
-  const [volSafetyModal, setVolSafetyModal] = useState(null); // { ip, target, from }
   const [sessionOrder, setSessionOrder] = useState(null); // null = SPEAKERS default; set on load if usage shifts any speaker ≥10 ranks
   const [anchorGroupIp, setAnchorGroupIp] = useState(null);
   const groupCardRefs = useRef({});
   const wiimIpOverrides = useRef({}); // speakerName → override IP (persists across fetchSpeakers calls)
   const volumeTimers = useRef({});
-  const volumeBaselines = useRef({}); // ip → { startVol, timer } for rapid-increase safety check
+  const recentVolumeChanges = useRef({});     // ip → timestamp of last user volume/mute change; polls preserve local value within VOLUME_GUARD_MS
   const deviceIds = useRef({});
   const prevSourceRef = useRef({});          // ip → last confirmed source (for transition detection)
   const speakerDataRef = useRef({});         // always-fresh speakerData for use inside setTimeout callbacks
   const maTrackDataRef = useRef({});         // always-fresh maTrackData for use inside setTimeout callbacks
   const haConfigRef    = useRef(null);       // always-fresh haConfig for use inside setTimeout callbacks
   const autoTransitionTimers = useRef({});   // ip → debounce timer handle
+  const usageStamps = useRef({});            // name → timestamp of last /usage post; throttles hold-button repeats to one hit per interaction
 
   const recordUsage = name => {
     if (!name) return;
+    const last = usageStamps.current[name];
+    if (last && Date.now() - last < 5000) return;
+    usageStamps.current[name] = Date.now();
     fetch('/usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
   };
 
@@ -1927,7 +1935,16 @@ function AllSpeakersView() {
     const speakerList = list.length ? list : SPEAKERS;
     const promises = speakerList.map(async (spk) => {
       const data = await fetchSpeakerData(spk);
-      setSpeakerData(prev => ({ ...prev, [data.ip]: data }));
+      setSpeakerData(prev => {
+        // Preserve a just-changed volume/mute: device lag + send debounce mean a poll
+        // fired right after a user adjustment can read the stale pre-change level and
+        // make the slider jump back. Keep the optimistic local value inside the guard window.
+        const changed = recentVolumeChanges.current[data.ip];
+        if (changed && Date.now() - changed < VOLUME_GUARD_MS && prev[data.ip]) {
+          return { ...prev, [data.ip]: { ...data, volume: prev[data.ip].volume, muted: prev[data.ip].muted } };
+        }
+        return { ...prev, [data.ip]: data };
+      });
     });
     await Promise.all(promises);
     fetchMaGroups();
@@ -2290,7 +2307,9 @@ function AllSpeakersView() {
     setTimeout(async () => { await pollAll(); setTimeout(() => setAnchorGroupIp(masterIp), 200); }, 1200);
   };
 
-  const applyVolumeChange = (ip, level, immediate = false) => {
+  const onVolumeChange = (ip, level, immediate = false) => {
+    if (immediate) recordUsage(speakerData[ip]?.name);
+    recentVolumeChanges.current[ip] = Date.now();
     setSpeakerData(prev => ({ ...prev, [ip]: { ...prev[ip], volume: level } }));
     if (speakerData[ip]?.brand === 'wiim') {
       clearTimeout(volumeTimers.current[ip]);
@@ -2309,48 +2328,12 @@ function AllSpeakersView() {
     }
   };
 
-  const onVolumeChange = (ip, level, immediate = false) => {
-    if (immediate) recordUsage(speakerData[ip]?.name);
-    const currentVol = speakerData[ip]?.volume ?? 0;
-
-    // Safety check: increases above 50 that jump >10 — either in one shot (slider)
-    // or cumulatively in a short burst (± taps). Baseline = volume when burst began.
-    if (level > currentVol && level > 50) {
-      const baseline = volumeBaselines.current[ip];
-      if (!baseline) {
-        const timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
-        volumeBaselines.current[ip] = { startVol: currentVol, timer };
-        if (level - currentVol > 10) {
-          setVolSafetyModal({ ip, target: level, from: currentVol });
-          return;
-        }
-      } else {
-        clearTimeout(baseline.timer);
-        baseline.timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
-        if (level - baseline.startVol > 10) {
-          setVolSafetyModal({ ip, target: level, from: baseline.startVol });
-          return;
-        }
-      }
-    }
-
-    applyVolumeChange(ip, level, immediate);
-  };
-
-  const confirmVolumeSafety = () => {
-    const { ip, target } = volSafetyModal;
-    if (volumeBaselines.current[ip]) clearTimeout(volumeBaselines.current[ip].timer);
-    const timer = setTimeout(() => { delete volumeBaselines.current[ip]; }, 4000);
-    volumeBaselines.current[ip] = { startVol: target, timer };
-    setVolSafetyModal(null);
-    applyVolumeChange(ip, target, true);
-  };
-
   const onMute = (ip) => {
     const current = speakerData[ip];
     if (!current) return;
     recordUsage(current.name);
     const newMuted = !current.muted;
+    recentVolumeChanges.current[ip] = Date.now();
     setSpeakerData(prev => ({ ...prev, [ip]: { ...prev[ip], muted: newMuted } }));
     if (current.brand === 'wiim') {
       fetch('/wiim/mute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, muted: newMuted }) });
@@ -2886,32 +2869,6 @@ function AllSpeakersView() {
         />
       )}
 
-      {/* Volume safety confirmation */}
-      {volSafetyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
-          onClick={() => setVolSafetyModal(null)}>
-          <div className="bg-slate-800 border border-slate-600 rounded-2xl p-6 mx-6 max-w-sm w-full shadow-2xl"
-            onClick={e => e.stopPropagation()}>
-            <div className="text-2xl mb-3 text-center">🔊</div>
-            <p className="text-white text-base font-semibold text-center mb-1">Volume is getting loud</p>
-            <p className="text-slate-400 text-sm text-center mb-6">
-              That's +{volSafetyModal.target - volSafetyModal.from} in a few seconds
-              — now at <span className="text-white font-bold">{volSafetyModal.target}</span>.
-              Keep going?
-            </p>
-            <div className="flex gap-3">
-              <button onClick={() => setVolSafetyModal(null)}
-                className="flex-1 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 active:bg-slate-500 text-white font-medium">
-                Cancel
-              </button>
-              <button onClick={confirmVolumeSafety}
-                className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-400 text-white font-semibold">
-                Yes, louder
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
