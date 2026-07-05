@@ -10,6 +10,10 @@ const activeStationUris = {};
 // Per-queue Pandora track-start state: { trackKey, startElapsed } — lets us compute per-track position from cumulative elapsed_time
 const pandoraPositionState = {};
 
+// Queue-health debounce: only surface a mismatch if it persisted across the previous poll too.
+// Kills transient flashes during track/source transitions (e.g. brief STANDBY at end-of-track).
+let prevQueueHealthKeys = new Set();
+
 // Look up HA media_player entity ID from Bose speaker name via haConfig.speakerEntities
 function speakerNameToEntityId(name) {
   const cfg = getConfig();
@@ -1052,7 +1056,13 @@ async function handleHa(req, res) {
         }
       }
 
-      ok(res, { enabled: true, ok: issues.length === 0, issues });
+      // Debounce: report only issues that were also present last poll, so a single
+      // transient reading (stale WS source, end-of-track STANDBY blip) doesn't flash the banner.
+      const curKeys = new Set(issues.map(i => `${i.queueId}|${i.issue}`));
+      const stable  = issues.filter(i => prevQueueHealthKeys.has(`${i.queueId}|${i.issue}`));
+      prevQueueHealthKeys = curKeys;
+
+      ok(res, { enabled: true, ok: stable.length === 0, issues: stable });
     } catch (e) { err(res, e.message); }
     return;
   }

@@ -312,6 +312,7 @@ function pollSpeaker(ip, name) {
           if (!source) return;
           const last = prev;
           prev = source;
+          lastSource[name] = source;  // keep shared cache fresh (queue-health reads this; WS alone can go stale)
 
           const cfg2 = getConfig();
           const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === name && r.boseSwitchInput?.source);
