@@ -237,6 +237,15 @@ Key state variables in the React app:
 
 ---
 
+## Known Audio Setup Notes
+
+### Main Bedroom — AUX + Belkin AirPlay
+- The Main Bedroom speaker uses AUX input connected to a Belkin AirPlay device.
+- **Do NOT use Bluetooth sync/grouping** with other speakers — the delay is noticeable and bad.
+- **Use AirPlay grouping from the Belkin** instead to include other rooms. AirPlay grouping stays in sync; Bluetooth does not.
+
+---
+
 ## What Works Post-Cloud Shutdown
 
 | Feature | Status |
