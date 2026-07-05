@@ -1,28 +1,36 @@
-# Agent Handoff Note
+# Agent Handoff — MA Queue Mismatch (false-positive banner)
 
-**From:** Claude Code on the Windows PC (`C:\Users\kthed\LocalSoundTouch`)
-**To:** Claude Code in the mobile/cloud sandbox
+**Owner of this task:** whichever Claude Kevin talks to next (PC or mobile).
 **Date:** 2026-07-05
+**Status:** Root-caused with high confidence. NOT yet fixed. Waiting on one piece of info from Kevin.
 
-## Situation
+## Symptom (confirmed by Kevin)
+Red **"MA Queue Mismatch"** banner appears in the UI **while audio is playing fine**. False positive — the audio is actually working. So this is over-eager detection, not a real desync.
 
-The PC checkout is clean and exactly at `origin/main` (`89c8fb0`). It has no uncommitted changes and nothing ahead to push. The uncommitted work Kevin mentioned lives only in **your** sandbox — the PC never received it.
+## Where the code lives
+- **Detection:** `haHandler.js` → `GET /ha/queue-health` (starts ~line 993). Gated behind `cfg.features.queueHealthCheck`.
+- **Banner UI:** `public/js/app2.jsx:2790` (`queueHealthIssues`), polled from `/ha/queue-health` at `app2.jsx:1981`.
 
-There is also a remote branch `origin/claude/check-latest-updates-pupmf` with 2 commits not on `main`:
-- `6ac12b9 docs: add bedroom AUX/Belkin AirPlay grouping note`
-- `d32041c test: add deploy marker to index.html` (looks like a throwaway marker — worth dropping)
+## How detection works
+For each speaker in `cfg.speakerQueues`:
+- **Bose:** if its MA queue `state === 'playing'` AND the **cached hardware source** `boseSources[name]` (from `boseWatcher`) `!== expected` (usually `AIRPLAY`, or the redirect's input) → raise issue `"MA playing but Bose on <src> (not AIRPLAY)"`.
+- **Non-Bose (WiiM/Belkin):** if MA queue `state === 'playing'` AND the MA `player.state === 'idle'` → `"MA queue playing but player is idle"`; also warns if `player.powered === false`.
 
-## Recommendation
+## Two candidate false-positive vectors (need banner text to disambiguate)
+1. **Stale cached Bose source (MOST LIKELY).** `boseWatcher` refreshes source only every 60s (`POLL_MS = 60000`) plus WebSocket events. If a WS `nowPlayingUpdated` source-change is missed, `boseSources[name]` stays stale (e.g. `STANDBY`/`PRODUCT`) while MA genuinely plays via AirPlay → false banner. Live queue dump confirmed queues cycle idle↔playing rapidly (Sunroom/Living Room have `next_item` + resume positions), so transient lag is plausible.
+2. **Synced / group-member player.** A WiiM synced to another player, or a Bose group *member*, can show its queue as `playing` while its own `player.state === 'idle'` or `powered === false` → false banner.
 
-1. In your sandbox, commit your outstanding changes with a clear message.
-2. `git push origin main` (that push has to happen from your sandbox — it's the only place those commits exist).
-3. If the `deploy marker` change was just a test, don't carry it into `main`.
+## NEEDED FROM KEVIN (ask him)
+The **exact red text** under the banner while sound is playing. Format is `"<Speaker>: <issue>"`. That single line identifies which vector (1 or 2) and which speaker.
 
-## Your move — reply so I can see it
+## Recommended fix (apply once banner text confirms vector)
+- **Debounce:** only surface an issue if the same `(speaker, queueId)` mismatch persists across **two consecutive** `/ha/queue-health` polls. Kills transient flashes during track/source transitions. Requires keeping last-poll issue set server-side in `haHandler.js` (module-level Map keyed by queueId).
+- **Don't warn on unknown/stale source:** skip the Bose check when `boseSources[name]` is falsy or older than ~2 poll intervals (add a timestamp to `boseWatcher`'s cached source so staleness is detectable).
+- **Group/sync awareness:** in the non-Bose check, skip the idle/powered warning when the player is `synced_to` something or is an active AirPlay group member (queue is `playing` legitimately via the leader).
+- Consider gating the banner off entirely (`features.queueHealthCheck: false` in haConfig.json) as an immediate mitigation until the fix ships.
 
-Create a file at the repo root named **`AGENT_REPLY.md`**, commit it, and push to `origin/main`. In it, tell me:
-- Have you pushed your changes yet? What commit SHA is now on top of `origin/main`?
-- List of files you changed and a one-line summary of each.
-- Anything you want the PC side to do next (deploy, review, merge the `check-latest-updates` branch, etc.).
+## Immediate mitigation (no code change)
+Set `features.queueHealthCheck` to `false` in `haConfig.json` on the Pi and redeploy — hides the banner now. Re-enable after the debounce fix.
 
-Once I see `AGENT_REPLY.md` land on the remote, I'll `git pull` on the PC and take it from there.
+---
+*(Mobile: if you fix this, update this file or drop an `AGENT_REPLY.md` with the SHA and what changed.)*
