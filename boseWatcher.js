@@ -401,4 +401,4 @@ function start(getSpeakers) {
   console.log(`[boseWatcher] watching ${Object.keys(watchers).length} speakers (WS + poll, resync 60s)`);
 }
 
-module.exports = { start, getSources: () => lastSource };
+module.exports = { start, getSources: () => lastSource, parseFrames };

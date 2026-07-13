@@ -4,6 +4,9 @@ const http = require('http');
 const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig, maPost, resolveQueueRedirect } = require('./maClient');
 const pandoraTracker = require('./pandoraTracker');
 
+// Bose speaker HTTP API port (env override for tests)
+const BOSE_PORT = parseInt(process.env.LST_BOSE_PORT) || 8090;
+
 // Track the station URI most recently played on each queue (for stop→rejoin→restart)
 const activeStationUris = {};
 
@@ -109,7 +112,7 @@ function boseSwitchInput(ip, source, sourceAccount = '') {
   const body = `<ContentItem source="${source}" sourceAccount="${sourceAccount}" type="ad" location="" isPresetable="false"/>`;
   return new Promise((resolve, reject) => {
     const req = http.request({
-      hostname: ip, port: 8090, path: '/select', method: 'POST',
+      hostname: ip, port: BOSE_PORT, path: '/select', method: 'POST',
       headers: { 'Content-Type': 'application/xml', 'Content-Length': Buffer.byteLength(body) },
     }, (res) => {
       let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
@@ -1162,3 +1165,4 @@ async function handleHa(req, res) {
 }
 
 module.exports = handleHa;
+module.exports.getActiveGroups = getActiveGroups; // exported for tests

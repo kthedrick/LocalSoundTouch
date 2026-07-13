@@ -10,7 +10,8 @@ let _config = null;
 function getConfig() {
   if (!_config) {
     try {
-      _config = JSON.parse(fs.readFileSync(path.join(__dirname, 'haConfig.json'), 'utf8'));
+      const cfgPath = process.env.LST_HA_CONFIG || path.join(__dirname, 'haConfig.json');
+      _config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
     } catch (e) {
       console.warn('[maClient] haConfig.json not found:', e.message);
       _config = {};

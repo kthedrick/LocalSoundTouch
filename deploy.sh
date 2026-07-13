@@ -23,10 +23,14 @@ ADDON_DIR="/addons/localsoundtouch"
 
 SSH="ssh -p $PI_PORT $PI_USER@$PI_ADDR"
 
+echo "→ Running tests ..."
+node --test 'tests/**/*.test.js' || { echo "✗ Tests failed — deploy aborted."; exit 1; }
+
 echo "→ Syncing files to $PI_ADDR:$ADDON_DIR ..."
 tar -czf - \
   --exclude='./.git' \
   --exclude='./.claude' \
+  --exclude='./tests' \
   --exclude='./*.pdf' \
   --exclude='./nasConfig.json' \
   --exclude='./haConfig.json' \

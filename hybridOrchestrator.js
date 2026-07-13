@@ -573,4 +573,4 @@ async function startAlbumOnce(queueId, stationUri, stationName) {
   return { ok: true, albumName, trackCount: tracks.length };
 }
 
-module.exports = { startPlaylist, startAlbumOnce, stop: stopPlaylist, getAll, findAlbumTracks };
+module.exports = { startPlaylist, startAlbumOnce, stop: stopPlaylist, getAll, findAlbumTracks, artistMatches, extractPerformer };

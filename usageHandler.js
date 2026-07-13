@@ -3,7 +3,7 @@ const path = require('path');
 
 // /data = HA add-on persistent storage — survives image rebuilds (deploy.sh).
 // Migrate any legacy __dirname copy on first run so existing counts aren't lost.
-const DATA_DIR  = fs.existsSync('/data') ? '/data' : __dirname;
+const DATA_DIR  = process.env.LST_DATA_DIR || (fs.existsSync('/data') ? '/data' : __dirname);
 const DATA_FILE = path.join(DATA_DIR, 'usage.json');
 const LEGACY_FILE = path.join(__dirname, 'usage.json');
 if (DATA_DIR !== __dirname && !fs.existsSync(DATA_FILE) && fs.existsSync(LEGACY_FILE)) {

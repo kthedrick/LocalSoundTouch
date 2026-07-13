@@ -208,3 +208,7 @@ module.exports = async function handleWiim(req, res) {
     if (!res.headersSent) { res.writeHead(500); res.end(err.message); }
   }
 };
+
+// exported for tests
+module.exports.hexDecode = hexDecode;
+module.exports.modeToSource = modeToSource;

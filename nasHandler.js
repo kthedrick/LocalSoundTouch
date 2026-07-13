@@ -39,7 +39,7 @@ async function findArtFile(host, username, password, folderPath) {
 }
 
 function getConfig() {
-  const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'nasConfig.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(process.env.LST_NAS_CONFIG || path.join(__dirname, 'nasConfig.json'), 'utf8'));
   return cfg;
 }
 

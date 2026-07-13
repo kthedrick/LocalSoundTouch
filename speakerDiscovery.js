@@ -138,4 +138,6 @@ function getSpeakers() {
 module.exports = {
   discoverSpeakers,
   getSpeakers,
+  // exported for tests
+  ipToInt, intToIp, maskToPrefix, getScanRange, isValidInfoResponse, parseNameFromInfo,
 };

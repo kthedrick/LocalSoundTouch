@@ -436,4 +436,4 @@ async function handleUpnp(req, res) {
   res.writeHead(404); res.end('Not found');
 }
 
-module.exports = { handle: handleUpnp, setServerBase };
+module.exports = { handle: handleUpnp, setServerBase, soapEnvelope, makeDIDL, contentTypeFromUrl };

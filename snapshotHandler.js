@@ -110,3 +110,9 @@ module.exports = async function handleSnapshot(req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(snapshot));
 };
+
+// exported for tests
+module.exports.xmlField = xmlField;
+module.exports.xmlAttr = xmlAttr;
+module.exports.hexDecode = hexDecode;
+module.exports.wiimMode = wiimMode;

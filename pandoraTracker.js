@@ -15,7 +15,7 @@ const fs   = require('fs');
 const path = require('path');
 
 // Use /data (HA add-on persistent storage) when available, fall back to __dirname for local dev
-const DATA_DIR  = fs.existsSync('/data') ? '/data' : __dirname;
+const DATA_DIR  = process.env.LST_DATA_DIR || (fs.existsSync('/data') ? '/data' : __dirname);
 const DATA_FILE = path.join(DATA_DIR, 'pandoraPlaylists.json');
 
 // queueId → { trackKey, stationName, artist, title, album, trackDuration, queueElapsedAtStart, lastQueueElapsed }

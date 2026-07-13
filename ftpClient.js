@@ -192,4 +192,4 @@ async function retrieve(host, user, pass, ftpPath, startByte = 0) {
   }
 }
 
-module.exports = { list, listAll, retrieve, getFileSize };
+module.exports = { list, listAll, retrieve, getFileSize, parseListing };
