@@ -2,7 +2,6 @@
 
 const http = require('http');
 const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig, maPost, resolveQueueRedirect } = require('./maClient');
-const { maWsPlayerSync, maWsPlayerUnSync } = require('./maWsClient');
 const pandoraTracker = require('./pandoraTracker');
 
 // Track the station URI most recently played on each queue (for stop→rejoin→restart)
@@ -823,12 +822,10 @@ async function handleHa(req, res) {
         return;
       }
 
-      // Add each member to the group.
-      // Bose/AirPlay players: use players/cmd/group (AirPlay ring-buffer late-join, no stop needed).
-      // WiiM-type players (can_group_with: []): use WebSocket players/player_sync instead —
-      // REST API rejects player_sync with "Invalid Command"; WebSocket path works.
+      // players/cmd/group adds a single player to the target's group. Works for Bose
+      // (AirPlay ring-buffer late-join, no stop needed) and native-wiim-provider players
+      // (wiim_uuid:* IDs — MA sets synced_to internally). Verified 2026-07.
       const results = [];
-      const maWsOpts = { host: new URL(cfg.maUrl || 'http://homeassistant:8095').hostname, port: parseInt(new URL(cfg.maUrl || 'http://homeassistant:8095').port) || 8095, token: cfg.maToken };
       for (const name of names) {
         let memberId = nameToQueue[name];
         // Speakers with a playRedirects entry (e.g. Bose-Bedroom → Belkin AirPlay adapter)
@@ -839,25 +836,10 @@ async function handleHa(req, res) {
           console.warn('[ha/group-include] no player ID for %s, skipping', name);
           continue;
         }
-        // Detect WiiM-type players by empty can_group_with — they cannot join AirPlay groups.
-        const maPlayer = (maPlayers || []).find(p => p.player_id === memberId);
-        const isWiim   = maPlayer && Array.isArray(maPlayer.can_group_with) && maPlayer.can_group_with.length === 0;
-        if (isWiim) {
-          console.log('[ha/group-include] WS player_sync: %s → leader %s', memberId, leaderPlayerId);
-          try {
-            const r = await maWsPlayerSync(memberId, leaderPlayerId, maWsOpts);
-            console.log('[ha/group-include] WS player_sync result:', JSON.stringify(r).slice(0, 200));
-            results.push({ name, memberId, result: r, method: 'ws_sync' });
-          } catch (e) {
-            console.error('[ha/group-include] WS player_sync failed for %s: %s', name, e.message);
-            results.push({ name, memberId, error: e.message, method: 'ws_sync' });
-          }
-        } else {
-          console.log('[ha/group-include] cmd/group: %s → leader %s', memberId, leaderPlayerId);
-          const r = await groupPlayer(memberId, leaderPlayerId);
-          console.log('[ha/group-include] cmd/group result:', JSON.stringify(r).slice(0, 200));
-          results.push({ name, memberId, result: r, method: 'group' });
-        }
+        console.log('[ha/group-include] cmd/group: %s → leader %s', memberId, leaderPlayerId);
+        const r = await groupPlayer(memberId, leaderPlayerId);
+        console.log('[ha/group-include] cmd/group result:', JSON.stringify(r).slice(0, 200));
+        results.push({ name, memberId, result: r, method: 'group' });
       }
       ok(res, { status: 200, results });
     } catch (e) {
@@ -881,7 +863,8 @@ async function handleHa(req, res) {
   }
 
   // POST /ha/group-remove — unjoin a speaker from its MA group { speakerName }
-  // Bose/AirPlay: players/cmd/ungroup. WiiM-type (can_group_with:[]): WebSocket players/player_unsync.
+  // players/cmd/ungroup works for Bose AND native-wiim-provider players (verified 2026-07).
+  // Do NOT gate on can_group_with — MA empties it while a player is synced.
   if (url === '/ha/group-remove' && req.method === 'POST') {
     const body = await readBody(req);
     const cfg = getConfig();
@@ -893,18 +876,8 @@ async function handleHa(req, res) {
       return;
     }
     try {
-      const maPlayers2 = (await getAllPlayers())?.players || [];
-      const maPlayer2  = maPlayers2.find(p => p.player_id === playerId);
-      const isWiim2    = maPlayer2 && Array.isArray(maPlayer2.can_group_with) && maPlayer2.can_group_with.length === 0;
-      let result;
-      if (isWiim2) {
-        const maWsOpts2 = { host: new URL(cfg.maUrl || 'http://homeassistant:8095').hostname, port: parseInt(new URL(cfg.maUrl || 'http://homeassistant:8095').port) || 8095, token: cfg.maToken };
-        result = await maWsPlayerUnSync(playerId, maWsOpts2);
-        console.log('[ha/group-remove] WS player_unsync %s (%s) result: %j', body.speakerName, playerId, result);
-      } else {
-        result = await ungroupPlayer(playerId);
-        console.log('[ha/group-remove] cmd/ungroup %s (%s) result: %j', body.speakerName, playerId, result);
-      }
+      const result = await ungroupPlayer(playerId);
+      console.log('[ha/group-remove] cmd/ungroup %s (%s) result: %j', body.speakerName, playerId, result);
       ok(res, { status: 200 });
     } catch (e) {
       console.error('[ha/group-remove] error:', e.message);

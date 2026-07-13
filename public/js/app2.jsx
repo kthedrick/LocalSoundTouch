@@ -2192,6 +2192,9 @@ function AllSpeakersView() {
     merged.forEach(g => {
       if (g.speakers.length !== 1) return;
       if (removingMembersRef.current.has(g.speakers[0].name)) return; // mid-removal: don't re-absorb into phantom
+      // Stopped speakers keep stale last-track metadata (WiiM does this) — only
+      // actively-playing speakers can form a phantom group.
+      if (g.speakers[0].playStatus !== 'PLAY_STATE') return;
       const np = g.speakers[0].nowPlaying;
       if (!np || np.source !== 'AIRPLAY' || !np.track || !np.artist) return;
       const key = `${np.artist}|${np.track}`;
@@ -2364,8 +2367,18 @@ function AllSpeakersView() {
         }
       } else if (key === 'POWER') {
         if (wiimSrc === 'AIRPLAY' && wiimQueue) {
-          fetch('/ha/stop',  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: wiimQueue }) });
-          fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: wiimQueue }) });
+          // Mirror the Bose POWER logic: a group MEMBER only ungroups (leader keeps
+          // playing); solo/leader stops+clears its own queue.
+          const wiimIsGroupMember = maGroups.some(g => g.members && g.members.includes(wiimName));
+          if (!wiimIsGroupMember) {
+            fetch('/ha/stop',  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: wiimQueue }) });
+            fetch('/ha/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: wiimQueue }) });
+          }
+          if (wiimName) {
+            fetch('/ha/group-remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ speakerName: wiimName }) })
+              .then(() => setTimeout(() => fetchMaGroups(), 1500))
+              .catch(() => {});
+          }
         } else {
           fetch('/wiim/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, key: 'PLAY_PAUSE' }) });
         }
