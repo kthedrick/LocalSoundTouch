@@ -167,6 +167,7 @@ Flow in `joinSpeakerNow` / `doStopJoinRestart` (app2.jsx):
 - **haConfig.json**: git-ignored, deployed separately via SSH heredoc
 - **deploy.sh**: uses port 22222 for SSH; CRLF fix applied automatically
 - **MA token vs HA token**: these are separate auth systems; MA token won't work for HA REST API
+- **MA add-on outage (2026-07-18)**: MA was `boot: manual` + `watchdog: false` — a stop/crash left it down silently, killing all MA features. Now set to auto+watchdog via Supervisor API. `maPost` wraps connection failures as "Music Assistant unreachable — check that the MA add-on is running" (raw AggregateErrors have BLANK `.message`). UI polls `GET /ha/ma-health` every 30s → red banner linking to the HA add-on page (`cfg.maAddonSlug`, default `d5369777_music_assistant`). User can't log into MA's own UI directly — always link to HA.
 - **Bose mute**: `POST /volume` with `<volume>N<muteenabled>bool</muteenabled></volume>` (mixed-content XML) works on our units despite not matching official docs — confirmed 2026-07. Don't "fix" to `/key` MUTE.
 
 ---

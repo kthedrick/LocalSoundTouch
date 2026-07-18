@@ -61,7 +61,15 @@ async function maPost(command, args) {
       });
     });
     req.setTimeout(10000, () => req.destroy(new Error('MA request timeout: ' + command)));
-    req.on('error', reject);
+    // Wrap connection failures in an actionable message. Raw errors can be
+    // AggregateErrors with an EMPTY .message (Node tries IPv4+IPv6, both refused),
+    // which made the 2026-07-18 "MA add-on stopped" outage log as blank errors.
+    req.on('error', (e) => {
+      const detail = e.message || (e.errors || []).map(x => x.message || x.code).join('; ') || e.code || String(e);
+      const friendly = new Error(`Music Assistant unreachable (${maUrl.hostname}:${parseInt(maUrl.port) || 8095}) — check that the Music Assistant add-on is running. [${command}: ${detail}]`);
+      friendly.code = e.code || 'MA_UNREACHABLE';
+      reject(friendly);
+    });
     req.write(body);
     req.end();
   });

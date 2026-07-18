@@ -1858,6 +1858,7 @@ function AllSpeakersView() {
   const removingMembersRef = useRef(new Set());
   const [showWholeHouse, setShowWholeHouse] = useState(false);
   const [queueHealthIssues, setQueueHealthIssues] = useState([]);
+  const [maDown, setMaDown] = useState(null);   // null = MA up; { error, url } = down
   const [wiimAlerts, setWiimAlerts] = useState([]); // unused; auto-applied on mount
   const [sessionOrder, setSessionOrder] = useState(null); // null = SPEAKERS default; set on load if usage shifts any speaker ≥10 ranks
   const [anchorGroupIp, setAnchorGroupIp] = useState(null);
@@ -1973,10 +1974,14 @@ function AllSpeakersView() {
     fetchMaGroups();
 
     // Queue health check — polls every 30s, shows red banner on mismatch
-    const pollQueueHealth = () =>
+    const pollQueueHealth = () => {
       fetch('/ha/queue-health').then(r => r.json()).then(d => {
         if (d.enabled) setQueueHealthIssues(d.issues || []);
       }).catch(() => {});
+      fetch('/ha/ma-health').then(r => r.json()).then(d => {
+        setMaDown(d.maUp === false ? { error: d.error, url: d.maAddonUrl } : null);
+      }).catch(() => {});
+    };
     pollQueueHealth();
     const healthTimer = setInterval(pollQueueHealth, 30000);
 
@@ -2696,6 +2701,18 @@ function AllSpeakersView() {
             </button>
           </div>
         </div>
+
+        {/* MA down banner — Pandora/browse/grouping all depend on MA */}
+        {maDown && (
+          <div className="mb-3 rounded-xl bg-red-900/60 border border-red-600/50 px-4 py-3">
+            <p className="text-red-300 text-xs font-semibold uppercase tracking-wider mb-1">Music Assistant Not Responding</p>
+            <p className="text-red-200 text-sm mb-2">Pandora, browsing and grouping won't work until the MA add-on is running again.</p>
+            <a href={maDown.url} target="_blank" rel="noopener"
+              className="inline-block px-3 py-1.5 bg-red-700 hover:bg-red-600 text-white rounded-lg text-xs font-semibold transition">
+              Open MA add-on in Home Assistant →
+            </a>
+          </div>
+        )}
 
         {/* Queue health banner */}
         {queueHealthIssues.length > 0 && (

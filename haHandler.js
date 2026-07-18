@@ -1185,6 +1185,22 @@ async function handleHa(req, res) {
     return;
   }
 
+  // GET /ha/ma-health — is Music Assistant reachable? UI polls this every 30s and
+  // shows a banner linking to the HA add-on page when MA is down (user can't log
+  // into MA's own UI directly — the HA ingress page is the way in).
+  if (url === '/ha/ma-health' && req.method === 'GET') {
+    const cfg = getConfig();
+    const haBase = (cfg.haUrl || 'http://homeassistant:8123').replace(/\/$/, '');
+    const maAddonUrl = haBase + '/hassio/addon/' + (cfg.maAddonSlug || 'd5369777_music_assistant') + '/info';
+    try {
+      await getAllPlayers();
+      ok(res, { maUp: true });
+    } catch (e) {
+      ok(res, { maUp: false, error: e.message, maAddonUrl });
+    }
+    return;
+  }
+
   // GET /ha/queue-health — cross-reference MA playing queues against actual speaker state
   if (url === '/ha/queue-health' && req.method === 'GET') {
     const cfg = getConfig();
