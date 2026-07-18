@@ -389,7 +389,7 @@ async function handleHa(req, res) {
   // GET /ha/config — return haConfig (no token) for the UI
   if (url === '/ha/config' && req.method === 'GET') {
     const cfg = getConfig();
-    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [], features: cfg.features || {}, hasAppleTvPlug: !!cfg.tvConfig?.appleTvPlugEntity };
+    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [], features: cfg.features || {}, hasAppleTvPlug: !!cfg.tvConfig?.appleTvPlugEntity, speakerToggles: cfg.speakerToggles || [] };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(safe));
     return;
@@ -1181,6 +1181,33 @@ async function handleHa(req, res) {
         : [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(relevant, null, 2));
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/switch-state?entity=X — read an HA switch listed in cfg.speakerToggles
+  // (e.g. the Living Room bass plug). Allowlisted so the UI can't probe arbitrary entities.
+  if (url.startsWith('/ha/switch-state') && req.method === 'GET') {
+    try {
+      const cfg = getConfig();
+      const entity = new URL(req.url, 'http://localhost').searchParams.get('entity');
+      if (!(cfg.speakerToggles || []).some(t => t.entity === entity)) { err(res, 'unknown switch entity'); return; }
+      const state = await haGet('/api/states/' + entity);
+      ok(res, { state: state?.state || 'unknown' });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/switch-set { entity, on } — flip an allowlisted speaker toggle switch.
+  // Manual override; groupSideEffects keep flipping the same switch automatically.
+  if (url === '/ha/switch-set' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const cfg = getConfig();
+      if (!(cfg.speakerToggles || []).some(t => t.entity === body.entity)) { err(res, 'unknown switch entity'); return; }
+      await haServiceCall('/api/services/switch/turn_' + (body.on ? 'on' : 'off'), { entity_id: body.entity });
+      console.log('[switch-set] %s → %s', body.entity, body.on ? 'on' : 'off');
+      ok(res, { state: body.on ? 'on' : 'off' });
     } catch (e) { err(res, e.message); }
     return;
   }

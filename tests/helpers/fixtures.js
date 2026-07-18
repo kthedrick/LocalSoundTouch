@@ -62,6 +62,11 @@ function baseConfig(mockPort) {
       haSwitch: 'switch.living_room_bass',
       onGrouped: 'on', onSeparated: 'off',
     }],
+    speakerToggles: [{
+      speakerName: 'Bose-Living Room',
+      entity: 'switch.living_room_bass',
+      label: 'Bass',
+    }],
     features: {},
     favorites: [],
     presetActions: {},

@@ -83,6 +83,12 @@ The `/ha/group-state` handler uses: "any entity that has OTHER known entities in
 
 ---
 
+## Speaker Toggles (manual HA switch pills)
+
+`haConfig.speakerToggles: [{ speakerName, entity, label }]` → pill button next to that speaker's name in its group card (e.g. Living Room "Bass"). Endpoints: `GET /ha/switch-state?entity=`, `POST /ha/switch-set { entity, on }` — allowlisted to configured entities only. Pill polls every 15s so automatic `groupSideEffects` changes (same switch) stay reflected. Both manual + automatic control coexist by design.
+
+---
+
 ## MA API Reference (confirmed working)
 
 Base: `POST http://localhost:8095/api` with `{ command, args }` and Bearer MA token.

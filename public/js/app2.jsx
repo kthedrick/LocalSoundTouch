@@ -1170,6 +1170,42 @@ function HoldButton({ onStep, className, children }) {
 }
 
 // ── GroupCard ─────────────────────────────────────────────────────────────────
+// ── SwitchTogglePill ──────────────────────────────────────────────────────────
+// Small on/off pill for an HA switch tied to a speaker (e.g. Living Room bass
+// plug). groupSideEffects flip the same switch automatically — poll to stay in
+// sync with those changes.
+function SwitchTogglePill({ toggle }) {
+  const [state, setState] = useState(null);   // 'on' | 'off' | null = loading/unknown
+  const [busy, setBusy] = useState(false);
+  const load = () => fetch('/ha/switch-state?entity=' + encodeURIComponent(toggle.entity))
+    .then(r => r.json()).then(d => { if (d.ok) setState(d.state); }).catch(() => {});
+  useEffect(() => { load(); const iv = setInterval(load, 15000); return () => clearInterval(iv); }, [toggle.entity]);
+  const flip = async () => {
+    if (busy) return;
+    setBusy(true);
+    const next = state !== 'on';
+    try {
+      const r = await fetch('/ha/switch-set', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entity: toggle.entity, on: next }),
+      });
+      const d = await r.json();
+      if (d.ok) setState(d.state);
+    } catch {}
+    setBusy(false);
+  };
+  if (state === null) return null;
+  const on = state === 'on';
+  return (
+    <button onClick={flip} disabled={busy} title={toggle.label + (on ? ' is on — tap to turn off' : ' is off — tap to turn on')}
+      className={'px-1.5 py-0.5 rounded text-[10px] font-semibold transition ' +
+        (busy ? 'opacity-50 cursor-wait ' : '') +
+        (on ? 'bg-amber-600/80 text-white hover:bg-amber-500' : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-slate-200')}>
+      {toggle.label} {on ? 'ON' : 'OFF'}
+    </button>
+  );
+}
+
 function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, onMaGroupRemove, removingMembers, otherSpeakers, speakerData, groups, onOpenNas, onPlayNasFolder, haConfig, onPlayFavorite, maTrack, pendingGroups, onTogglePendingMember, onEstablishGroup, onEstablishBoseZone, onJoinNow, onAdoptPhantomGroup, hybridQueues, onStopPlaylistAlbum, onStartPlaylistAlbum }) {
   const master   = group.speakers.find(s => s.ip === group.masterIp) || group.speakers[0];
   const np       = master?.nowPlaying;
@@ -1444,6 +1480,9 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-white text-sm font-semibold truncate">{spk.name}</span>
+                {spk.reachable && (haConfig?.speakerToggles || []).filter(t => t.speakerName === spk.name).map(t => (
+                  <SwitchTogglePill key={t.entity} toggle={t} />
+                ))}
                 {spk.reachable && spk.name === 'Bose-Sunroom 300' && (
                   <>
                     <button onClick={() => resetTvAudio(spk)} disabled={tvResetBusy} title="Reset TV audio (ARC re-handshake)"
