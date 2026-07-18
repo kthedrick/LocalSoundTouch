@@ -82,6 +82,7 @@ const resumeQueue  = (queueId)                       => maPost('player_queues/pl
 const nextTrack    = (queueId)                       => maPost('player_queues/next',          { queue_id: queueId });
 const prevTrack    = (queueId)                       => maPost('player_queues/previous',      { queue_id: queueId });
 const getAllQueues  = ()                              => maPost('player_queues/all',           {});
-const playMedia    = (queueId, uri)                  => maPost('player_queues/play_media',    { queue_id: queueId, media: uri, option: 'play' });
+const playMedia        = (queueId, uri)                  => maPost('player_queues/play_media',    { queue_id: queueId, media: uri, option: 'play' });
+const setPlayerVolume  = (playerId, volume)              => maPost('players/cmd/volume',           { player_id: playerId, volume: Math.round(volume) });
 
-module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, reloadConfig, getConfig, resolveQueueRedirect };
+module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, setPlayerVolume, reloadConfig, getConfig, resolveQueueRedirect };

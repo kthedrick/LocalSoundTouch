@@ -134,7 +134,7 @@ async function fetchSpeakerData(spk) {
 }
 
 // ── MABrowserModal ────────────────────────────────────────────────────────────
-function MABrowserModal({ speakerName, queueId, onClose, onBeforePlay, onFilesystem }) {
+function MABrowserModal({ speakerName, queueId, speakerVolume, onClose, onBeforePlay, onFilesystem }) {
   const [stack, setStack]   = useState([{ uri: '', title: 'Library' }]);
   const [items, setItems]   = useState(null);
   const [error, setError]   = useState(null);
@@ -165,7 +165,7 @@ function MABrowserModal({ speakerName, queueId, onClose, onBeforePlay, onFilesys
       const res = await fetch('/ha/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ queueId, uri: item.uri, name: item.name }),
+        body: JSON.stringify({ queueId, uri: item.uri, name: item.name, volume: speakerVolume }),
       });
       const d = await res.json();
       if (d.ok) { setStatus(item.name + ' started'); setTimeout(onClose, 800); }
@@ -255,7 +255,7 @@ function MABrowserModal({ speakerName, queueId, onClose, onBeforePlay, onFilesys
 }
 
 // ── NasBrowserModal ───────────────────────────────────────────────────────────
-function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBeforePlay, queueId, maFilesystemBase }) {
+function NasBrowserModal({ speakerIp, speakerName, speakerVolume, onClose, initialPath, onBeforePlay, queueId, maFilesystemBase }) {
   const [serverBase, setServerBase] = useState('');
   const [currentPath, setCurrentPath] = useState(initialPath || '/volume1/music');
   const [entries, setEntries] = useState(null);
@@ -310,7 +310,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBefor
         const res = await fetch('/ha/play', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ queueId, uri: maUri }),
+          body: JSON.stringify({ queueId, uri: maUri, volume: speakerVolume }),
         });
         const data = await res.json();
         if (!data.ok) setStatus('Error: ' + (data.error || 'unknown'));
@@ -356,7 +356,7 @@ function NasBrowserModal({ speakerIp, speakerName, onClose, initialPath, onBefor
         const res = await fetch('/ha/play', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ queueId, uri: maUri }),
+          body: JSON.stringify({ queueId, uri: maUri, volume: speakerVolume }),
         });
         const d = await res.json();
         if (!d.ok) setStatus('Error: ' + (d.error || 'unknown'));
@@ -1129,7 +1129,7 @@ function NowPlayingModal({ queueId, masterIp, art, track, artist, album, positio
                 await fetch('/ha/play', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ queueId, uri: liveAlbumInfo.restartUri }),
+                  body: JSON.stringify({ queueId, uri: liveAlbumInfo.restartUri, volume: speakerVolume }),
                 });
                 onClose();
               }}
@@ -1225,31 +1225,21 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
     if (onAdoptPhantomGroup) await onAdoptPhantomGroup(group);
   };
 
-  const resetTvAudio = async (ip) => {
+  // Server-side HDMI/ARC reset: stops MA, power-cycles the Bose, bounces the LG TV's
+  // sound output (tv_speaker → external_arc) to force an ARC re-handshake, re-selects
+  // TV input. hard=true reboots the soundbar via its console port (~2 min, background).
+  const resetTvAudio = async (spk, hard = false) => {
+    if (hard && !window.confirm('Reboot the soundbar? Takes ~2 minutes; it switches back to TV input automatically when done.')) return;
     setTvResetBusy(true);
-    let appleTvWasActive = false;
-    if (master?.nowPlaying?.source === 'PRODUCT') {
-      const tvState = await fetch('/ha/tv-state').then(r => r.json()).catch(() => null);
-      appleTvWasActive = !!(tvState?.tv?.appleTV);
-    }
     try {
-      await apiPost(ip, '/key', '<key state="press" sender="Gabbo">POWER</key>');
-      await new Promise(r => setTimeout(r, 100));
-      await apiPost(ip, '/key', '<key state="release" sender="Gabbo">POWER</key>');
-      await new Promise(r => setTimeout(r, 5000));
-      if (appleTvWasActive) {
-        await fetch('/ha/appletv-on', { method: 'POST' });
-        await new Promise(r => setTimeout(r, 3000));
-      }
-      // Select TV source — Bose auto-powers-on when a source is selected from standby
-      await fetch('/api/' + ip + '/select', {
+      await fetch('/ha/reset-tv-audio', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/xml' },
-        body: '<ContentItem source="PRODUCT" sourceAccount="TV"></ContentItem>',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakerName: spk.name, ip: spk.ip, hard }),
       });
-    } finally {
-      setTvResetBusy(false);
-    }
+    } catch {}
+    if (hard) setTimeout(() => setTvResetBusy(false), 120000);
+    else setTvResetBusy(false);
   };
 
   useEffect(() => { setUpnpRepeatLocal(master?.upnpRepeat || 'REPEAT_OFF'); }, [master?.upnpRepeat]);
@@ -1453,9 +1443,13 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                 <span className="text-white text-sm font-semibold truncate">{spk.name}</span>
                 {spk.reachable && spk.name === 'Bose-Sunroom 300' && (
                   <>
-                    <button onClick={() => resetTvAudio(spk.ip)} disabled={tvResetBusy} title="Reset TV audio"
+                    <button onClick={() => resetTvAudio(spk)} disabled={tvResetBusy} title="Reset TV audio (ARC re-handshake)"
                       className={'p-1 rounded transition ' + (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-700')}>
                       {tvResetBusy ? '…' : '↺'}
+                    </button>
+                    <button onClick={() => resetTvAudio(spk, true)} disabled={tvResetBusy} title="Reboot soundbar (~2 min) — for stuck HDMI audio the reset doesn't fix"
+                      className={'p-1 rounded transition ' + (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-orange-400 hover:bg-slate-700')}>
+                      ⚡
                     </button>
                     <button onClick={() => setSoundSettingsSpk(spk)} title="Sound settings"
                       className="p-1 rounded transition text-slate-500 hover:text-white hover:bg-slate-700">⚙</button>
@@ -1681,21 +1675,10 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Home</h3>
         <div className="flex gap-1.5 flex-wrap items-center">
           {haConfig?.releaseToTV?.includes(master?.name) && (<>
-            <button onClick={async () => {
-                await fetch('/ha/release-to-tv', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ speakerName: master?.name }),
-                });
-                await new Promise(r => setTimeout(r, 3000));
-                fetch(`/api/${group.masterIp}/select`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/xml' },
-                  body: '<ContentItem source="PRODUCT" sourceAccount="TV"></ContentItem>',
-                });
-              }}
-              className="px-3 py-1.5 bg-slate-700 hover:bg-blue-800 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition">
-              📺 TV Input
+            <button onClick={() => resetTvAudio({ name: master?.name, ip: group.masterIp })}
+              disabled={tvResetBusy}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-blue-800 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition disabled:opacity-50">
+              {tvResetBusy ? '📺 …' : '📺 TV Input'}
             </button>
             <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
           </>)}
@@ -1736,6 +1719,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         <MABrowserModal
           speakerName={master?.name || group.masterIp}
           queueId={haConfig?.speakerQueues?.[master?.name] || haConfig?.queues?.airplayGroup}
+          speakerVolume={master?.volume}
           onClose={() => setRadioBrowser(false)}
           onBeforePlay={async () => { await maybeAdopt(); await onEstablishGroup(group.masterIp); }}
           onFilesystem={(fsUri) => {
@@ -2598,7 +2582,7 @@ function AllSpeakersView() {
     const res = await fetch('/ha/play', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ queueId: targetQueue, uri: fav.uri }),
+      body: JSON.stringify({ queueId: targetQueue, uri: fav.uri, volume: speakerData[leaderIp]?.volume }),
     });
     const d = await res.json();
     if (d.ok) {
@@ -2773,6 +2757,7 @@ function AllSpeakersView() {
         <NasBrowserModal
           speakerIp={nasBrowser.ip}
           speakerName={nasBrowser.name}
+          speakerVolume={speakerData[nasBrowser.ip]?.volume}
           initialPath={nasBrowser.initialPath}
           queueId={nasBrowser.queueId}
           maFilesystemBase={nasBrowser.maFilesystemBase}

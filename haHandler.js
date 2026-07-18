@@ -1,7 +1,7 @@
 // HTTP handler for /ha/* routes — Music Assistant integration
 
 const http = require('http');
-const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, getConfig, maPost, resolveQueueRedirect } = require('./maClient');
+const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, setPlayerVolume, getConfig, maPost, resolveQueueRedirect } = require('./maClient');
 const pandoraTracker = require('./pandoraTracker');
 
 // Bose speaker HTTP API port (env override for tests)
@@ -121,6 +121,115 @@ function boseSwitchInput(ip, source, sourceAccount = '') {
     req.on('error', reject);
     req.write(body); req.end();
   });
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// GET from a Bose speaker's local HTTP API (returns raw body string)
+function boseGet(ip, path) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: ip, port: BOSE_PORT, path, method: 'GET' }, (res) => {
+      let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
+    });
+    req.setTimeout(5000, () => req.destroy(new Error('Bose GET timeout: ' + ip + path)));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Send a Bose key (press + release) via the speaker's local HTTP API
+function boseKey(ip, key) {
+  const send = state => new Promise((resolve, reject) => {
+    const body = `<key state="${state}" sender="Gabbo">${key}</key>`;
+    const req = http.request({
+      hostname: ip, port: BOSE_PORT, path: '/key', method: 'POST',
+      headers: { 'Content-Type': 'application/xml', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => { res.resume(); res.on('end', resolve); });
+    req.setTimeout(5000, () => req.destroy(new Error('Bose /key timeout: ' + ip)));
+    req.on('error', reject);
+    req.write(body); req.end();
+  });
+  return send('press').then(() => sleep(100)).then(() => send('release'));
+}
+
+// Hard reboot via the SoundTouch diagnostic console (TCP 17000, open on LAN).
+// The only API-level way to fully re-initialize the ST300's HDMI board.
+function boseConsoleReboot(ip) {
+  const net = require('net');
+  return new Promise((resolve, reject) => {
+    const sock = net.createConnection({ host: ip, port: 17000 });
+    sock.setTimeout(5000);
+    sock.on('connect', () => { sock.write('sys reboot\r\n'); setTimeout(() => { sock.destroy(); resolve(); }, 1000); });
+    sock.on('timeout', () => { sock.destroy(); reject(new Error('console timeout: ' + ip)); });
+    sock.on('error', reject);
+  });
+}
+
+// LG TV state relevant to ARC reset. arcOutput = the output to restore after the
+// tv_speaker bounce (usually "external_arc").
+async function getLgTvState() {
+  const cfg = getConfig();
+  const entity = cfg.tvConfig?.lgTvEntity;
+  if (!entity) return { on: false };
+  const state = await haGet('/api/states/' + entity).catch(() => null);
+  const on = !!state && !['off', 'unavailable', 'unknown'].includes(state.state);
+  const soundOut = state?.attributes?.sound_output;
+  return {
+    entity, on,
+    source: state?.attributes?.source || '',
+    arcOutput: soundOut && soundOut !== 'tv_speaker' ? soundOut : 'external_arc',
+  };
+}
+
+async function wakeAppleTv() {
+  const cfg = getConfig();
+  const mediaEntity = cfg.tvConfig?.appleTvEntity;
+  if (!mediaEntity) return null;
+  const remoteEntity = cfg.tvConfig?.appleTvRemoteEntity || mediaEntity.replace(/^media_player\./, 'remote.');
+  await haServicePost('/api/services/remote/turn_on', { entity_id: remoteEntity });
+  await sleep(500);
+  await haServicePost('/api/services/remote/send_command', { entity_id: remoteEntity, command: 'home' });
+  return remoteEntity;
+}
+
+// Stop + clear a speaker's MA queue and the shared AirPlay group queue so MA/HA
+// can't grab the speaker back mid-reset.
+async function releaseSpeakerQueues(speakerName) {
+  const cfg = getConfig();
+  const speakerQueueId = cfg.speakerQueues?.[speakerName];
+  const groupQueueId   = cfg.queues?.airplayGroup;
+  const hybrid = require('./hybridOrchestrator');
+  if (speakerQueueId) hybrid.stop(speakerQueueId);
+  if (groupQueueId)   hybrid.stop(groupQueueId);
+  const ops = [];
+  if (speakerQueueId) ops.push(stopQueue(speakerQueueId).then(() => clearQueue(speakerQueueId)));
+  if (groupQueueId)   ops.push(stopQueue(groupQueueId).then(() => clearQueue(groupQueueId)));
+  await Promise.allSettled(ops);
+}
+
+// ARC re-handshake: hand TV audio to its internal speakers, put the Bose on the TV
+// input (wakes it from standby), then hand audio back to ARC so the TV re-negotiates
+// with a live soundbar. Wakes the Apple TV first if it was the active input, so an
+// HDMI signal is present during the handshake.
+async function arcResetSequence(ip, step) {
+  const cfg = getConfig();
+  const tv = await getLgTvState();
+  if (tv.on) {
+    await haServicePost('/api/services/webostv/select_sound_output', { entity_id: tv.entity, sound_output: 'tv_speaker' })
+      .catch(e => console.warn('[reset-tv] tv_speaker switch failed:', e.message));
+    await sleep(step);
+  }
+  if (tv.on && cfg.tvConfig?.appleTvEntity && tv.source === cfg.tvConfig?.appleTvSource) {
+    await wakeAppleTv().catch(e => console.warn('[reset-tv] appletv wake failed:', e.message));
+    await sleep(step);
+  }
+  await boseSwitchInput(ip, 'PRODUCT', 'TV');
+  await sleep(step);
+  if (tv.on) {
+    await haServicePost('/api/services/webostv/select_sound_output', { entity_id: tv.entity, sound_output: tv.arcOutput })
+      .catch(e => console.warn('[reset-tv] ARC restore failed:', e.message));
+  }
+  return tv;
 }
 
 // Compute active MA speaker groups — shared by /ha/group-state and applyGroupSideEffects.
@@ -477,18 +586,50 @@ async function handleHa(req, res) {
   // POST /ha/release-to-tv — stop+clear speaker queue AND AirPlay group queue { speakerName }
   if (url === '/ha/release-to-tv' && req.method === 'POST') {
     const body = await readBody(req);
-    const cfg = getConfig();
-    const speakerQueueId = cfg.speakerQueues?.[body.speakerName];
-    const groupQueueId   = cfg.queues?.airplayGroup;
-    const hybrid = require('./hybridOrchestrator');
-    if (speakerQueueId) hybrid.stop(speakerQueueId);
-    if (groupQueueId)   hybrid.stop(groupQueueId);
     try {
-      const ops = [];
-      if (speakerQueueId) ops.push(stopQueue(speakerQueueId).then(() => clearQueue(speakerQueueId)));
-      if (groupQueueId)   ops.push(stopQueue(groupQueueId).then(() => clearQueue(groupQueueId)));
-      await Promise.allSettled(ops);
+      await releaseSpeakerQueues(body.speakerName);
       ok(res, {});
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/reset-tv-audio — HDMI/ARC audio reset for the ST300 { speakerName, ip, hard? }
+  // Soft: MA release → Bose to standby → LG drops ARC (tv_speaker) → Bose wakes on TV
+  // input → LG re-grabs ARC. Fixes the dead-HDMI-audio state without a reboot.
+  // Hard: MA release → console reboot (TCP 17000) → responds immediately; background
+  // waits for the speaker to come back, then runs the same ARC re-handshake.
+  if (url === '/ha/reset-tv-audio' && req.method === 'POST') {
+    const body = await readBody(req);
+    const ip = body.ip;
+    if (!ip) { err(res, 'ip required'); return; }
+    const step = parseInt(process.env.LST_RESET_STEP_MS) || 2500;
+    try {
+      await releaseSpeakerQueues(body.speakerName);
+
+      if (body.hard) {
+        await boseConsoleReboot(ip);
+        console.log('[reset-tv] %s console reboot issued', ip);
+        ok(res, { rebooting: true });
+        (async () => {
+          await sleep(15000);  // let it actually go down before polling
+          const deadline = Date.now() + 180000;
+          while (Date.now() < deadline) {
+            try { await boseGet(ip, '/info'); break; } catch { await sleep(5000); }
+          }
+          await sleep(8000);   // audio subsystem settles after HTTP comes back
+          const tv = await arcResetSequence(ip, step).catch(e => ({ error: e.message }));
+          console.log('[reset-tv] hard reset complete for %s tv=%j', ip, tv);
+        })().catch(e => console.error('[reset-tv] background error:', e.message));
+        return;
+      }
+
+      // Soft: power-cycle to standby first (unless already there), then re-handshake
+      const np = await boseGet(ip, '/now_playing').catch(() => '');
+      const inStandby = /source="STANDBY"/.test(np);
+      if (!inStandby) { await boseKey(ip, 'POWER'); await sleep(step); }
+      const tv = await arcResetSequence(ip, step);
+      console.log('[reset-tv] soft reset done for %s tvOn=%s', ip, tv.on);
+      ok(res, { reset: 'soft', tvOn: tv.on });
     } catch (e) { err(res, e.message); }
     return;
   }
@@ -552,6 +693,13 @@ async function handleHa(req, res) {
       const { uri } = body;
       const queueId = await applyRedirect(body.queueId);
       if (queueId !== body.queueId) hybrid.stop(queueId);
+
+      // Prime MA player volume to current speaker volume before starting AirPlay.
+      // Without this, MA sends its stale remembered volume via AirPlay on session init,
+      // causing the Bose to jump to a different level.
+      if (body.volume != null) {
+        await setPlayerVolume(queueId, body.volume).catch(e => console.warn('[ha/play] setPlayerVolume failed:', e.message));
+      }
 
       const result = await playMedia(queueId, uri);
       // Store under both keys so /ha/station-uri works whether the caller knows
@@ -968,15 +1116,10 @@ async function handleHa(req, res) {
   // POST /ha/appletv-on — wake Apple TV via HA
   if (url === '/ha/appletv-on' && req.method === 'POST') {
     try {
-      const cfg = getConfig();
-      const mediaEntity = cfg.tvConfig?.appleTvEntity;
-      if (!mediaEntity) { ok(res, { ok: false, error: 'no appleTvEntity configured' }); return; }
-      const remoteEntity = cfg.tvConfig?.appleTvRemoteEntity || mediaEntity.replace(/^media_player\./, 'remote.');
-      console.log('[appletv-on] media:', mediaEntity, 'remote:', remoteEntity);
-      await haServicePost('/api/services/remote/turn_on', { entity_id: remoteEntity });
-      await new Promise(r => setTimeout(r, 500));
-      await haServicePost('/api/services/remote/send_command', { entity_id: remoteEntity, command: 'home' });
-      ok(res, { ok: true, mediaEntity, remoteEntity });
+      const remoteEntity = await wakeAppleTv();
+      if (!remoteEntity) { ok(res, { ok: false, error: 'no appleTvEntity configured' }); return; }
+      console.log('[appletv-on] remote:', remoteEntity);
+      ok(res, { ok: true, remoteEntity });
     } catch (e) { err(res, e.message); }
     return;
   }

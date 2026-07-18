@@ -202,6 +202,14 @@ Bose-Bedroom is the only Bose speaker without native AirPlay support. A separate
 
 **Enhancement:** Replace 10s poll with HA's SSE event stream (`GET /api/stream` with `Authorization` header). HA pushes `state_changed` events immediately when the LG TV entity changes. Would reduce latency from ~10s to ~1s with no extra load. Requires reading a streaming HTTP response in Node.js (chunked, newline-delimited JSON events).
 
+### ST300 HDMI/ARC Audio Reset (added 2026-07-17)
+`POST /ha/reset-tv-audio { speakerName, ip, hard? }` — fixes dead HDMI audio (LG TV → soundbar via ARC).
+- **Root cause:** stale ARC handshake. Plain `/select PRODUCT/TV` switches input but doesn't re-negotiate ARC — that's why old "TV Input" button failed.
+- **Soft:** MA release → Bose POWER→standby → LG `webostv.select_sound_output` → `tv_speaker` → Bose select PRODUCT/TV (wakes) → back to `external_arc`. LG re-negotiates ARC with live soundbar. Wakes Apple TV first if it was active input.
+- **Hard:** `sys reboot` via ST300 diagnostic console TCP **17000** (verified open). Responds immediately; background waits for reboot then runs soft sequence.
+- UI: ↺ = soft, ⚡ = hard (confirm), 📺 TV Input button = soft reset now.
+- Test delays: `LST_RESET_STEP_MS` env (default 2500ms).
+
 ### Classical Music Album Matching — Diacritic Normalization
 Composer name spelling varies across sources (Pandora uses "Fryderyk Chopin", Apple Music uses "Frédéric Chopin"). The `artistMatches` function in `hybridOrchestrator.js` uses word-based token matching but doesn't normalize diacritics. Adding `str.normalize('NFD').replace(/[̀-ͯ]/g, '')` before comparison would catch more variants without false positives.
 
