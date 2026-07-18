@@ -1198,7 +1198,7 @@ function SwitchTogglePill({ toggle }) {
   const on = state === 'on';
   return (
     <button onClick={flip} disabled={busy} title={toggle.label + (on ? ' is on — tap to turn off' : ' is off — tap to turn on')}
-      className={'flex items-center gap-1 transition ' + (busy ? 'opacity-50 cursor-wait' : '')}>
+      className={'flex items-center gap-1 ml-2 transition ' + (busy ? 'opacity-50 cursor-wait' : '')}>
       <span className={'text-[10px] font-semibold ' + (on ? 'text-amber-400' : 'text-slate-500')}>{toggle.label}</span>
       <span className={'relative inline-block w-7 h-4 rounded-full transition-colors duration-200 ' + (on ? 'bg-amber-500' : 'bg-slate-600')}>
         <span className={'absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform duration-200 ' + (on ? 'translate-x-3' : '')} />
