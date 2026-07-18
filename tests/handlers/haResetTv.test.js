@@ -20,7 +20,7 @@ before(async () => {
     mockPort: mock.port,
     overrides: {
       releaseToTV: ['Bose-Sunroom 300'],
-      tvConfig: { lgTvEntity: LG, appleTvEntity: 'media_player.appletv', appleTvSource: 'Apple OTT' },
+      tvConfig: { lgTvEntity: LG, appleTvEntity: 'media_player.appletv', appleTvSource: 'Apple OTT', appleTvPlugEntity: 'switch.appletv_plug' },
     },
   });
   app = await require('../helpers/appServer').startApp();
@@ -115,4 +115,25 @@ test('hard reset: console port unreachable → clean error, no crash', async () 
 test('missing ip → error', async () => {
   const r = await post('/ha/reset-tv-audio', { speakerName: 'Bose-Sunroom 300' });
   assert.equal((await r.json()).ok, false);
+});
+
+test('appletv-power-cycle: plug off → on, then background wake after boot', async () => {
+  const r = await post('/ha/appletv-power-cycle', {});
+  const d = await r.json();
+  assert.equal(d.ok, true);
+  assert.equal(d.powerCycled, true);
+  const svc = mock.requests.filter(x => x.path.startsWith('/api/services/switch/'));
+  assert.deepEqual(svc.map(x => x.path), ['/api/services/switch/turn_off', '/api/services/switch/turn_on']);
+  assert.equal(svc[0].body.entity_id, 'switch.appletv_plug');
+  // Background wake fires after the simulated boot wait
+  await mock.waitFor(x => x.path === '/api/services/remote/turn_on');
+});
+
+test('appletv-power-cycle: plug switch 500 → error surfaced, no turn_on attempted', async () => {
+  mock.failService('/api/services/switch/');
+  const r = await post('/ha/appletv-power-cycle', {});
+  const d = await r.json();
+  assert.equal(d.ok, false);
+  assert.match(d.error, /500/);
+  assert.ok(!mock.requests.some(x => x.path === '/api/services/switch/turn_on'), 'stopped after turn_off failure');
 });

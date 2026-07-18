@@ -209,6 +209,7 @@ Bose-Bedroom is the only Bose speaker without native AirPlay support. A separate
 - **Hard:** `sys reboot` via ST300 diagnostic console TCP **17000** (verified open). Responds immediately; background waits for reboot then runs soft sequence.
 - UI: ↺ = soft, ⚡ = hard (confirm), 📺 TV Input button = soft reset now. Warnings from reset alert in UI.
 - Test delays: `LST_RESET_STEP_MS` env (default 2500ms).
+- `POST /ha/appletv-power-cycle` — hard power-cycle Apple TV via smart plug (`tvConfig.appleTvPlugEntity`, an HA switch). Off 10s → on → background wake after ~30s boot. UI "⚡ Apple TV" button appears only when configured (`hasAppleTvPlug` in /ha/config). Plug not yet purchased/installed as of 2026-07-17.
 - **Gotchas (2026-07-17 incident):** (1) HA webostv can 500 "Device is off" while TV screen is ON — use `haServiceCall` (throws ≥400), never bare `haServicePost`, for must-succeed calls. (2) Apple TV outputting to AirPlay = zero audio over HDMI + re-grabs speaker after reset; endpoint detects + warns. (3) Real-world fix was two-stage: LG ARC recovers first (TV settings/optical-for-a-day), Apple TV needs its own unplug/replug. (4) LG optical `sound_output` API value unverified (all candidates 500'd while connection down).
 
 ### Classical Music Album Matching — Diacritic Normalization

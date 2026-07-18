@@ -1205,6 +1205,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   const [soundSettingsSpk, setSoundSettingsSpk] = useState(null);
   const [upnpRepeatLocal, setUpnpRepeatLocal] = useState(master?.upnpRepeat || 'REPEAT_OFF');
   const [tvResetBusy, setTvResetBusy] = useState(false);
+  const [atvCycleBusy, setAtvCycleBusy] = useState(false);
   const [showAllSpeakers, setShowAllSpeakers] = useState(false);
   const [addingMembers, setAddingMembers] = useState(new Set());
   const timerRef = useRef(null);
@@ -1682,6 +1683,18 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
               className="px-3 py-1.5 bg-slate-700 hover:bg-blue-800 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition disabled:opacity-50">
               {tvResetBusy ? '📺 …' : '📺 TV Input'}
             </button>
+            {haConfig?.hasAppleTvPlug && (
+              <button onClick={async () => {
+                  if (!window.confirm('Power-cycle the Apple TV? It cuts power for 10s and reboots (~30s). Fixes wedged HDMI audio.')) return;
+                  setAtvCycleBusy(true);
+                  try { await fetch('/ha/appletv-power-cycle', { method: 'POST' }); } catch {}
+                  setTimeout(() => setAtvCycleBusy(false), 45000);
+                }}
+                disabled={atvCycleBusy}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-red-900 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition disabled:opacity-50">
+                {atvCycleBusy ? '⚡ rebooting…' : '⚡ Apple TV'}
+              </button>
+            )}
             <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
           </>)}
           <button onClick={async () => { await maybeAdopt(); onOpenNas(); }}

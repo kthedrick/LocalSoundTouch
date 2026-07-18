@@ -389,7 +389,7 @@ async function handleHa(req, res) {
   // GET /ha/config — return haConfig (no token) for the UI
   if (url === '/ha/config' && req.method === 'GET') {
     const cfg = getConfig();
-    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [], features: cfg.features || {} };
+    const safe = { queues: cfg.queues || {}, speakerQueues: cfg.speakerQueues || {}, speakerEntities: cfg.speakerEntities || {}, favorites: cfg.favorites || [], playRedirects: cfg.playRedirects || [], releaseToTV: cfg.releaseToTV || [], features: cfg.features || {}, hasAppleTvPlug: !!cfg.tvConfig?.appleTvPlugEntity };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(safe));
     return;
@@ -1140,6 +1140,30 @@ async function handleHa(req, res) {
       if (!remoteEntity) { ok(res, { ok: false, error: 'no appleTvEntity configured' }); return; }
       console.log('[appletv-on] remote:', remoteEntity);
       ok(res, { ok: true, remoteEntity });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/appletv-power-cycle — hard power-cycle the Apple TV via its smart plug.
+  // Its HDMI audio path can wedge in a way only a power cut clears (no power button;
+  // sleep doesn't help). Requires tvConfig.appleTvPlugEntity (an HA switch entity).
+  if (url === '/ha/appletv-power-cycle' && req.method === 'POST') {
+    const cfg = getConfig();
+    const plug = cfg.tvConfig?.appleTvPlugEntity;
+    if (!plug) { err(res, 'no appleTvPlugEntity configured in tvConfig'); return; }
+    const step = parseInt(process.env.LST_RESET_STEP_MS) || 2500;
+    try {
+      await haServiceCall('/api/services/switch/turn_off', { entity_id: plug });
+      await sleep(step * 4);   // ~10s off — let it fully discharge
+      await haServiceCall('/api/services/switch/turn_on', { entity_id: plug });
+      console.log('[appletv-cycle] plug %s cycled, waking after boot', plug);
+      ok(res, { powerCycled: true });
+      // Background: wake to Home once booted so the TV gets an HDMI signal again
+      (async () => {
+        await sleep(step * 12);   // ~30s boot
+        await wakeAppleTv().catch(e => console.warn('[appletv-cycle] wake failed:', e.message));
+        console.log('[appletv-cycle] wake sent');
+      })().catch(() => {});
     } catch (e) { err(res, e.message); }
     return;
   }
