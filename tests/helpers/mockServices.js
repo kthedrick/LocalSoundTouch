@@ -7,6 +7,7 @@ function createMockServer() {
   const maHandlers = {};          // MA command → fn(args) → response
   let   haStates   = [];          // GET /api/states response
   let   boseNowPlaying = '<nowPlaying source="AIRPLAY"><ContentItem source="AIRPLAY"/></nowPlaying>';
+  const failServicePrefixes = [];   // HA service paths that should return 500 (e.g. webostv when TV unreachable)
 
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -37,7 +38,10 @@ function createMockServer() {
         const state = haStates.find(s => s.entity_id === entity);
         return state ? send(200, state) : send(404, { message: 'not found' });
       }
-      if (req.method === 'POST' && req.url.startsWith('/api/services/')) return send(200, []);
+      if (req.method === 'POST' && req.url.startsWith('/api/services/')) {
+        if (failServicePrefixes.some(p => req.url.startsWith(p))) return send(500, 'Server got itself in trouble', 'text/plain');
+        return send(200, []);
+      }
       // Bose speaker local API
       if (req.method === 'POST' && req.url === '/select') return send(200, '<status>ok</status>', 'application/xml');
       if (req.method === 'POST' && req.url === '/key')    return send(200, '<status>ok</status>', 'application/xml');
@@ -56,9 +60,11 @@ function createMockServer() {
         onMa(command, fn) { maHandlers[command] = fn; },
         setStates(states) { haStates = states; },
         setBoseNowPlaying(xml) { boseNowPlaying = xml; },
+        failService(pathPrefix) { failServicePrefixes.push(pathPrefix); },
         reset() {
           requests.length = 0; Object.keys(maHandlers).forEach(k => delete maHandlers[k]); haStates = [];
           boseNowPlaying = '<nowPlaying source="AIRPLAY"><ContentItem source="AIRPLAY"/></nowPlaying>';
+          failServicePrefixes.length = 0;
         },
         // Poll until a recorded request matches (for fire-and-forget calls like boseSwitchInput)
         waitFor(pred, ms = 3000) {

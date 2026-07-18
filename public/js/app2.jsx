@@ -1232,11 +1232,13 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
     if (hard && !window.confirm('Reboot the soundbar? Takes ~2 minutes; it switches back to TV input automatically when done.')) return;
     setTvResetBusy(true);
     try {
-      await fetch('/ha/reset-tv-audio', {
+      const r = await fetch('/ha/reset-tv-audio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speakerName: spk.name, ip: spk.ip, hard }),
       });
+      const d = await r.json().catch(() => null);
+      if (d?.warnings?.length) alert('Reset ran, but:\n\n• ' + d.warnings.join('\n• '));
     } catch {}
     if (hard) setTimeout(() => setTvResetBusy(false), 120000);
     else setTvResetBusy(false);

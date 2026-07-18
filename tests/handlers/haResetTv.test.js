@@ -63,6 +63,26 @@ test('soft reset: MA release, POWER cycle, ARC bounce around TV select, Apple TV
 
   // Apple TV was the active input → woken so HDMI signal is present for the handshake
   assert.ok(mock.requests.some(x => x.path === '/api/services/remote/turn_on'), 'Apple TV wake fired');
+  assert.deepEqual(d.warnings, [], 'no warnings when every step succeeds');
+});
+
+test('soft reset: webostv 500 (TV unreachable) → ok but warning says ARC bounce did not happen', async () => {
+  lgTvOn('Live TV');
+  mock.failService('/api/services/webostv/');
+  const r = await post('/ha/reset-tv-audio', { speakerName: 'Bose-Sunroom 300', ip: '127.0.0.1' });
+  const d = await r.json();
+  assert.equal(d.ok, true);
+  assert.equal(d.warnings.length, 2, 'both sound-output calls warned');
+  assert.match(d.warnings[0], /ARC bounce did NOT happen/);
+});
+
+test('soft reset: AirPlay client re-grabs speaker → warning about Apple TV audio output', async () => {
+  lgTvOn('Live TV');
+  mock.setBoseNowPlaying('<nowPlaying deviceID="X" source="AIRPLAY"><ContentItem source="AIRPLAY"/><playStatus>PLAY_STATE</playStatus></nowPlaying>');
+  const r = await post('/ha/reset-tv-audio', { speakerName: 'Bose-Sunroom 300', ip: '127.0.0.1' });
+  const d = await r.json();
+  assert.equal(d.ok, true);
+  assert.ok(d.warnings.some(w => /re-grabbed the speaker/.test(w)), 'expected re-grab warning');
 });
 
 test('soft reset: TV off → no webostv calls, still selects TV input', async () => {

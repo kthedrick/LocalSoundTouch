@@ -181,14 +181,26 @@ async function getLgTvState() {
   };
 }
 
+// haServicePost resolves on ANY HTTP status — webostv returns 500 when HA has no
+// live connection to the TV ("Device is off and cannot be controlled"). This wrapper
+// turns HTTP errors into throws so callers can't mistake a failed call for success.
+async function haServiceCall(path, body) {
+  const resp = await haServicePost(path, body);
+  if (resp.status >= 400) {
+    const detail = typeof resp.body === 'object' ? JSON.stringify(resp.body) : String(resp.body);
+    throw new Error(`HA ${path} → ${resp.status}: ${detail.slice(0, 200)}`);
+  }
+  return resp;
+}
+
 async function wakeAppleTv() {
   const cfg = getConfig();
   const mediaEntity = cfg.tvConfig?.appleTvEntity;
   if (!mediaEntity) return null;
   const remoteEntity = cfg.tvConfig?.appleTvRemoteEntity || mediaEntity.replace(/^media_player\./, 'remote.');
-  await haServicePost('/api/services/remote/turn_on', { entity_id: remoteEntity });
+  await haServiceCall('/api/services/remote/turn_on', { entity_id: remoteEntity });
   await sleep(500);
-  await haServicePost('/api/services/remote/send_command', { entity_id: remoteEntity, command: 'home' });
+  await haServiceCall('/api/services/remote/send_command', { entity_id: remoteEntity, command: 'home' });
   return remoteEntity;
 }
 
@@ -210,26 +222,27 @@ async function releaseSpeakerQueues(speakerName) {
 // ARC re-handshake: hand TV audio to its internal speakers, put the Bose on the TV
 // input (wakes it from standby), then hand audio back to ARC so the TV re-negotiates
 // with a live soundbar. Wakes the Apple TV first if it was the active input, so an
-// HDMI signal is present during the handshake.
+// HDMI signal is present during the handshake. Any step that fails lands in
+// `warnings` — the ARC bounce is the whole point of this reset, so a swallowed
+// failure here makes the reset a silent no-op.
 async function arcResetSequence(ip, step) {
   const cfg = getConfig();
   const tv = await getLgTvState();
-  if (tv.on) {
-    await haServicePost('/api/services/webostv/select_sound_output', { entity_id: tv.entity, sound_output: 'tv_speaker' })
-      .catch(e => console.warn('[reset-tv] tv_speaker switch failed:', e.message));
-    await sleep(step);
-  }
+  const warnings = [];
+  const warn = msg => { warnings.push(msg); console.warn('[reset-tv]', msg); };
+  const lgOut = async (output) => {
+    try { await haServiceCall('/api/services/webostv/select_sound_output', { entity_id: tv.entity, sound_output: output }); }
+    catch (e) { warn(`LG sound output → ${output} failed (ARC bounce did NOT happen): ${e.message}`); }
+  };
+  if (tv.on) { await lgOut('tv_speaker'); await sleep(step); }
   if (tv.on && cfg.tvConfig?.appleTvEntity && tv.source === cfg.tvConfig?.appleTvSource) {
-    await wakeAppleTv().catch(e => console.warn('[reset-tv] appletv wake failed:', e.message));
+    try { await wakeAppleTv(); } catch (e) { warn('Apple TV wake failed: ' + e.message); }
     await sleep(step);
   }
   await boseSwitchInput(ip, 'PRODUCT', 'TV');
   await sleep(step);
-  if (tv.on) {
-    await haServicePost('/api/services/webostv/select_sound_output', { entity_id: tv.entity, sound_output: tv.arcOutput })
-      .catch(e => console.warn('[reset-tv] ARC restore failed:', e.message));
-  }
-  return tv;
+  if (tv.on) await lgOut(tv.arcOutput);
+  return { tv, warnings };
 }
 
 // Compute active MA speaker groups — shared by /ha/group-state and applyGroupSideEffects.
@@ -617,8 +630,8 @@ async function handleHa(req, res) {
             try { await boseGet(ip, '/info'); break; } catch { await sleep(5000); }
           }
           await sleep(8000);   // audio subsystem settles after HTTP comes back
-          const tv = await arcResetSequence(ip, step).catch(e => ({ error: e.message }));
-          console.log('[reset-tv] hard reset complete for %s tv=%j', ip, tv);
+          const seq = await arcResetSequence(ip, step).catch(e => ({ warnings: [e.message] }));
+          console.log('[reset-tv] hard reset complete for %s tvOn=%s warnings=%j', ip, seq.tv?.on, seq.warnings);
         })().catch(e => console.error('[reset-tv] background error:', e.message));
         return;
       }
@@ -627,9 +640,16 @@ async function handleHa(req, res) {
       const np = await boseGet(ip, '/now_playing').catch(() => '');
       const inStandby = /source="STANDBY"/.test(np);
       if (!inStandby) { await boseKey(ip, 'POWER'); await sleep(step); }
-      const tv = await arcResetSequence(ip, step);
-      console.log('[reset-tv] soft reset done for %s tvOn=%s', ip, tv.on);
-      ok(res, { reset: 'soft', tvOn: tv.on });
+      const { tv, warnings } = await arcResetSequence(ip, step);
+      // Detect an AirPlay client (usually the Apple TV) re-grabbing the speaker —
+      // it steals the input back and, worse, means no audio flows over HDMI at all.
+      await sleep(step);
+      const after = await boseGet(ip, '/now_playing').catch(() => '');
+      if (/source="AIRPLAY"/.test(after) && /PLAY_STATE/.test(after)) {
+        warnings.push('An AirPlay device re-grabbed the speaker right after the reset — probably the Apple TV. Set its audio output to TV Speakers (hold TV button on Siri remote → Audio), then run the reset again.');
+      }
+      console.log('[reset-tv] soft reset done for %s tvOn=%s warnings=%j', ip, tv.on, warnings);
+      ok(res, { reset: 'soft', tvOn: tv.on, warnings });
     } catch (e) { err(res, e.message); }
     return;
   }
