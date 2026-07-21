@@ -129,7 +129,27 @@
     return finalMerged;
   }
 
-  const AppLogic = { formatTime, buildRedirectMap, computeGroups };
+  // Decide how to add a member speaker to a leader's group (live join).
+  // Returns 'ma' | 'bose-zone' | 'none':
+  //   'ma'        → MA grouping (group-include). Leader playback is MA-managed.
+  //   'bose-zone' → native Bose SoundTouch zone (/setZone).
+  //   'none'      → no supported path (e.g. WiiM anywhere + non-MA leader — WiiM can't
+  //                 join a native Bose zone, and MA isn't driving the leader).
+  // MA manages playback when a Bose leader is on AIRPLAY, OR when a WiiM leader is actively
+  // playing: MA's native wiim provider streams to a WiiM over LinkPlay (reported as DLNA),
+  // so a WiiM leader NEVER reports AIRPLAY. Gating solely on 'AIRPLAY' silently dropped the
+  // join for WiiM-led groups.
+  function chooseJoinStrategy({ leaderSource, leaderBrand, memberBrand, hasMAEntity }) {
+    const leaderIsWiiM = leaderBrand === 'wiim';
+    const hasWiiM = leaderIsWiiM || memberBrand === 'wiim';
+    const leaderPlaying = !!leaderSource && leaderSource !== 'STANDBY' && leaderSource !== 'INVALID_SOURCE';
+    const maManagesLeader = leaderSource === 'AIRPLAY' || (leaderIsWiiM && leaderPlaying);
+    if (hasMAEntity && maManagesLeader) return 'ma';
+    if (!hasWiiM) return 'bose-zone';
+    return 'none';
+  }
+
+  const AppLogic = { formatTime, buildRedirectMap, computeGroups, chooseJoinStrategy };
   if (typeof module !== 'undefined' && module.exports) module.exports = AppLogic;
   if (typeof window !== 'undefined') window.AppLogic = AppLogic;
 })();

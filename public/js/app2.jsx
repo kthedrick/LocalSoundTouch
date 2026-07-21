@@ -2521,21 +2521,25 @@ function AllSpeakersView() {
     // Scroll after layout settles: fetchMaGroups/pollAll fire at 1200-1500ms, render follows shortly after
     setTimeout(() => setAnchorGroupIp(leaderIp), 1000);
     const leaderSource = speakerData[leaderIp]?.nowPlaying?.source;
-    const hasWiiM = speakerData[memberIp]?.brand === 'wiim' || speakerData[leaderIp]?.brand === 'wiim';
-
     const hasMAEntity = !!(leaderName && haConfig?.speakerEntities?.[leaderName]);
-    // Use MA grouping only when the source is AIRPLAY (MA is managing playback).
-    // All native Bose sources (UPNP, BLUETOOTH, LOCAL_INTERNET_RADIO, etc.) use zone grouping.
-    if (hasMAEntity && memberName && leaderSource === 'AIRPLAY') {
+    // 'ma' → MA group-include (Bose AIRPLAY leader, or a WiiM leader playing via MA's native
+    // provider which reports DLNA not AIRPLAY). 'bose-zone' → native Bose zone. 'none' → no path.
+    const strategy = AppLogic.chooseJoinStrategy({
+      leaderSource,
+      leaderBrand: speakerData[leaderIp]?.brand,
+      memberBrand: speakerData[memberIp]?.brand,
+      hasMAEntity,
+    });
+    if (strategy === 'ma' && memberName) {
       const queueId = haConfig?.speakerQueues?.[leaderName];
       return await joinToGroup(leaderIp, memberIp, leaderName, memberName, queueId)
         .then(() => null)
         .catch(e => e.message);
-    } else if (leaderName && !hasMAEntity) {
+    }
+    if (leaderName && !hasMAEntity) {
       console.warn('[joinSpeakerNow] no HA entity for leader:', leaderName);
     }
-    // Bose zone grouping for all non-AIRPLAY sources and speakers without MA entity
-    if (!hasWiiM && (leaderSource !== 'AIRPLAY' || !hasMAEntity)) {
+    if (strategy === 'bose-zone') {
       await addSpeakerToGroup(leaderIp, memberIp);
     }
     setTimeout(() => { fetchMaGroups(); pollAll(); }, 1200);

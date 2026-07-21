@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { formatTime, buildRedirectMap, computeGroups } = require('../../public/js/appLogic');
+const { formatTime, buildRedirectMap, computeGroups, chooseJoinStrategy } = require('../../public/js/appLogic');
 
 // ── formatTime ─────────────────────────────────────────────────────────────
 
@@ -20,6 +20,49 @@ test('buildRedirectMap keys by fromQueue, keeps full entry', () => {
   assert.equal(map['q-bed'].toQueue, 'q-belkin');
   assert.equal(map['q-x'], undefined);
   assert.deepEqual(buildRedirectMap(null), {});
+});
+
+// ── chooseJoinStrategy ─────────────────────────────────────────────────────
+
+test('chooseJoinStrategy: Bose AIRPLAY leader → ma', () => {
+  assert.equal(chooseJoinStrategy({
+    leaderSource: 'AIRPLAY', leaderBrand: 'bose', memberBrand: 'bose', hasMAEntity: true,
+  }), 'ma');
+});
+
+test('chooseJoinStrategy: WiiM leader playing via MA (DLNA, not AIRPLAY) → ma', () => {
+  // Regression: MA's native wiim provider streams over LinkPlay, reported as DLNA.
+  // Gating on AIRPLAY alone dropped the join and the Bose member never got added.
+  assert.equal(chooseJoinStrategy({
+    leaderSource: 'DLNA', leaderBrand: 'wiim', memberBrand: 'bose', hasMAEntity: true,
+  }), 'ma');
+});
+
+test('chooseJoinStrategy: idle WiiM leader → none (nothing playing to join)', () => {
+  assert.equal(chooseJoinStrategy({
+    leaderSource: null, leaderBrand: 'wiim', memberBrand: 'bose', hasMAEntity: true,
+  }), 'none');
+  assert.equal(chooseJoinStrategy({
+    leaderSource: 'STANDBY', leaderBrand: 'wiim', memberBrand: 'bose', hasMAEntity: true,
+  }), 'none');
+});
+
+test('chooseJoinStrategy: Bose native source (UPNP) → bose-zone', () => {
+  assert.equal(chooseJoinStrategy({
+    leaderSource: 'UPNP', leaderBrand: 'bose', memberBrand: 'bose', hasMAEntity: true,
+  }), 'bose-zone');
+});
+
+test('chooseJoinStrategy: WiiM member + Bose native leader → none (WiiM cannot join a Bose zone)', () => {
+  assert.equal(chooseJoinStrategy({
+    leaderSource: 'UPNP', leaderBrand: 'bose', memberBrand: 'wiim', hasMAEntity: true,
+  }), 'none');
+});
+
+test('chooseJoinStrategy: no MA entity + Bose native → bose-zone', () => {
+  assert.equal(chooseJoinStrategy({
+    leaderSource: 'BLUETOOTH', leaderBrand: 'bose', memberBrand: 'bose', hasMAEntity: false,
+  }), 'bose-zone');
 });
 
 // ── computeGroups ──────────────────────────────────────────────────────────
