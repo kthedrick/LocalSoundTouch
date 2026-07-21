@@ -70,6 +70,20 @@ test('group-include: works with the real array response shape', async () => {
   assert.deepEqual(maCalls('players/cmd/group'), [{ player_id: Q.wiim, target_player: Q.sunroom }]);
 });
 
+// Regression: WiiM-as-LEADER. A WiiM playing via MA's native wiim provider reports its
+// source as DLNA (not AIRPLAY), but must still be able to LEAD an MA group. group-include
+// maps 'WiiM Basement' → its wiim_uuid player and groups the Bose member's queue onto it.
+// Verified live 2026-07-20 (adding Bose-Kitchen to a WiiM Basement / Pandora group).
+test('group-include: WiiM leader accepts a Bose member', async () => {
+  mock.onMa('players/all', () => [
+    maPlayer(Q.wiim, { state: 'playing', synced_to: null }),
+    maPlayer(Q.kitchen),
+  ]);
+  const r = await post('/ha/group-include', { masterName: 'WiiM Basement', speakerNames: ['Bose-Kitchen'] });
+  assert.equal((await r.json()).ok, true);
+  assert.deepEqual(maCalls('players/cmd/group'), [{ player_id: Q.kitchen, target_player: Q.wiim }]);
+});
+
 test('group-include: Bedroom redirect groups the Belkin queue and switches AUX', async () => {
   mock.onMa('players/all', () => [maPlayer(Q.sunroom, { state: 'playing' })]);
   await post('/ha/group-include', { masterName: 'Bose-Sunroom 300', speakerNames: ['Bose-Bedroom'] });
