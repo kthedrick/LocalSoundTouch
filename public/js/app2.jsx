@@ -1899,6 +1899,7 @@ function AllSpeakersView() {
   const [showWholeHouse, setShowWholeHouse] = useState(false);
   const [queueHealthIssues, setQueueHealthIssues] = useState([]);
   const [maDown, setMaDown] = useState(null);   // null = MA up; { error, url } = down
+  const [appleMusicDown, setAppleMusicDown] = useState(null); // null = ok; { url } = provider unavailable
   const [wiimAlerts, setWiimAlerts] = useState([]); // unused; auto-applied on mount
   const [sessionOrder, setSessionOrder] = useState(null); // null = SPEAKERS default; set on load if usage shifts any speaker ≥10 ranks
   const [anchorGroupIp, setAnchorGroupIp] = useState(null);
@@ -2020,6 +2021,8 @@ function AllSpeakersView() {
       }).catch(() => {});
       fetch('/ha/ma-health').then(r => r.json()).then(d => {
         setMaDown(d.maUp === false ? { error: d.error, url: d.maAddonUrl } : null);
+        // Only flag Apple Music when MA itself is up (avoid stacking two banners for one outage)
+        setAppleMusicDown(d.maUp !== false && d.appleMusicUp === false ? { url: d.maAddonUrl } : null);
       }).catch(() => {});
     };
     pollQueueHealth();
@@ -2754,6 +2757,18 @@ function AllSpeakersView() {
             <a href={maDown.url} target="_blank" rel="noopener"
               className="inline-block px-3 py-1.5 bg-red-700 hover:bg-red-600 text-white rounded-lg text-xs font-semibold transition">
               Open MA add-on in Home Assistant →
+            </a>
+          </div>
+        )}
+
+        {/* Apple Music provider down — recorder, AM browse/play, playlist sync all paused */}
+        {appleMusicDown && (
+          <div className="mb-3 rounded-xl bg-amber-900/60 border border-amber-600/50 px-4 py-3">
+            <p className="text-amber-300 text-xs font-semibold uppercase tracking-wider mb-1">Apple Music Disconnected</p>
+            <p className="text-amber-200 text-sm mb-2">Apple Music browse/playback and Pandora→playlist recording are paused — the Music-User-Token likely expired. Tracks played now are saved unresolved and backfill automatically once it's reconnected.</p>
+            <a href={appleMusicDown.url} target="_blank" rel="noopener"
+              className="inline-block px-3 py-1.5 bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-xs font-semibold transition">
+              Reconnect Apple Music in Home Assistant →
             </a>
           </div>
         )}

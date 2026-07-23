@@ -831,10 +831,47 @@ async function handleHa(req, res) {
     const playlists = Object.entries(data).map(([station, v]) => ({
       station,
       trackCount: v.tracks.length,
+      unresolvedCount: (v.tracks || []).filter(t => !t.appleUri).length,
       maPlaylistId: v.maPlaylistId || null,
       tracks: v.tracks || [],
     }));
     ok(res, { playlists });
+    return;
+  }
+
+  // POST /ha/pandora-resolve — retry Apple Music resolution for all persisted tracks that
+  // are missing an appleUri (collected while Apple Music was down). Returns { resolved, stillMissing }.
+  if (url === '/ha/pandora-resolve' && req.method === 'POST') {
+    try {
+      const result = await pandoraTracker.resolveUnresolved(maPost);
+      ok(res, result);
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/pandora-backfill { tracks: [{ station, artist, title, album }] } — replay a batch
+  // of completed tracks (e.g. parsed from add-on logs during an Apple Music outage) through the
+  // collector. addToPlaylist is idempotent (dedups by artist|title) and resolves each via Apple
+  // Music. Returns per-track added/skipped/failed counts.
+  if (url === '/ha/pandora-backfill' && req.method === 'POST') {
+    const body = await readBody(req);
+    const tracks = Array.isArray(body?.tracks) ? body.tracks : [];
+    let added = 0, failed = 0;
+    const errors = [];
+    for (const t of tracks) {
+      const station = (t.station || '').trim();
+      const artist  = (t.artist  || '').trim();
+      const title   = (t.title   || '').trim();
+      if (!station || (!artist && !title)) { failed++; continue; }
+      try {
+        await pandoraTracker.addToPlaylist(maPost, station, artist, title, (t.album || '').trim());
+        added++;
+      } catch (e) {
+        failed++;
+        errors.push(`${artist} - ${title}: ${e.message}`);
+      }
+    }
+    ok(res, { processed: tracks.length, added, failed, errors: errors.slice(0, 20) });
     return;
   }
 
@@ -1221,7 +1258,16 @@ async function handleHa(req, res) {
     const maAddonUrl = haBase + '/hassio/addon/' + (cfg.maAddonSlug || 'd5369777_music_assistant') + '/info';
     try {
       await getAllPlayers();
-      ok(res, { maUp: true });
+      // Apple Music provider health — the Pandora→playlist recorder and AM browse/play all
+      // depend on it. An expired Music-User-Token silently drops the provider from the
+      // runtime list (available:false) with no other symptom, so surface it explicitly.
+      let appleMusicUp = true;
+      try {
+        const providers = await maPost('providers', {});
+        const ap = Array.isArray(providers) ? providers.find(p => p.domain === 'apple_music') : null;
+        appleMusicUp = !!(ap && ap.available);
+      } catch { /* providers hiccup — don't false-alarm on Apple Music */ }
+      ok(res, { maUp: true, appleMusicUp, maAddonUrl });
     } catch (e) {
       ok(res, { maUp: false, error: e.message, maAddonUrl });
     }
