@@ -51,3 +51,29 @@ test('search-music: empty query short-circuits without hitting MA', async () => 
   assert.deepEqual(d.tracks, []);
   assert.equal(called, false);
 });
+
+const post = (p, body) => fetch(app.base + p, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
+
+test('play-artist: resolves artist by name and plays the resolved (numeric-id) uri', async () => {
+  mock.onMa('music/search', (args) => {
+    assert.deepEqual(args.media_types, ['artist']);   // artist-only search
+    return { artists: [{ name: 'Danny Go!', uri: 'apple_music://artist/1475674203', image: { path: 'http://img/d.jpg' } }] };
+  });
+  let played = null;
+  mock.onMa('player_queues/play_media', (args) => { played = args; return null; });
+
+  const d = await (await post('/ha/play-artist', { queueId: 'up_test', name: 'Danny Go!' })).json();
+  assert.equal(d.ok, true);
+  assert.equal(d.uri, 'apple_music://artist/1475674203');
+  assert.equal(d.image, 'http://img/d.jpg');
+  assert.deepEqual(played, { queue_id: 'up_test', media: 'apple_music://artist/1475674203', option: 'play' });
+});
+
+test('play-artist: errors cleanly when no artist matches', async () => {
+  mock.onMa('music/search', () => ({ artists: [] }));
+  const d = await (await post('/ha/play-artist', { queueId: 'up_test', name: 'Nobody At All' })).json();
+  assert.equal(d.ok, false);
+  assert.match(d.error, /not found/i);
+});

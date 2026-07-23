@@ -781,6 +781,37 @@ async function handleHa(req, res) {
     return;
   }
 
+  // POST /ha/play-artist { queueId, name, volume } — play a whole artist by NAME.
+  // The artist URI carried on a track (track.artists[].uri) uses the artist's display name
+  // as its id (e.g. apple_music--xx://artist/Danny Go!) which MA cannot resolve — it 500s.
+  // So we search artists by name and play the resolved (numeric-id) artist URI, which works.
+  // Returns the resolved { uri, name, image } so the caller can record a working recent.
+  if (url === '/ha/play-artist' && req.method === 'POST') {
+    const body = await readBody(req);
+    const name = (body.name || '').trim();
+    if (!name) { err(res, 'artist name required'); return; }
+    const hybrid = require('./hybridOrchestrator');
+    hybrid.stop(body.queueId);
+    try {
+      const result  = await maPost('music/search', { search_query: name, media_types: ['artist'], limit: 5 });
+      const artists = (result?.artists || []).filter(a => a.uri && a.name);
+      const chosen  = artists.find(a => a.name.toLowerCase() === name.toLowerCase()) || artists[0];
+      if (!chosen) { err(res, 'Artist not found: ' + name); return; }
+
+      const queueId = await applyRedirect(body.queueId);
+      if (queueId !== body.queueId) hybrid.stop(queueId);
+      if (body.volume != null) await setPlayerVolume(queueId, body.volume).catch(() => {});
+      await playMedia(queueId, chosen.uri);
+      activeStationUris[queueId] = chosen.uri;
+      activeStationUris[body.queueId] = chosen.uri;
+
+      const image = chosen.image && (typeof chosen.image === 'string' ? chosen.image : chosen.image.path) || null;
+      console.log('[ha/play-artist] name=%j → uri=%s', name, chosen.uri);
+      ok(res, { uri: chosen.uri, name: chosen.name, image });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   // GET /ha/schema — fetch MA's API schema for debugging
   if (url === '/ha/schema' && req.method === 'GET') {
     const { maPost: _, getConfig, ...rest } = require('./maClient');

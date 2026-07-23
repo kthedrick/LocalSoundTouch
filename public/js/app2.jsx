@@ -292,6 +292,9 @@ function MASearchModal({ speakerName, queueId, speakerVolume, onClose, onBeforeP
     return () => clearTimeout(id);
   }, [q]);
 
+  const recordRecent = (entry) =>
+    fetch('/ha/recent-searches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) }).catch(() => {});
+
   const play = async (entry) => {
     if (!entry || !entry.uri) return;
     const label = entry.type === 'artist' ? entry.name + ' (artist)' : entry.name;
@@ -305,7 +308,27 @@ function MASearchModal({ speakerName, queueId, speakerVolume, onClose, onBeforeP
       const d = await res.json();
       if (d.ok) {
         setStatus('▶ ' + label);
-        fetch('/ha/recent-searches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) }).catch(() => {});
+        recordRecent(entry);
+        setTimeout(onClose, 900);
+      } else setStatus('Error: ' + (d.error || 'unknown'));
+    } catch (e) { setStatus('Error: ' + e.message); }
+  };
+
+  // Play a whole artist by NAME — the backend resolves it to a playable URI. The URI attached
+  // to a track can't be played directly (MA 500s on the name-based id), so we never use it.
+  const playArtistByName = async (name, image) => {
+    if (!name) return;
+    if (onBeforePlay) await onBeforePlay();
+    setStatus('Starting ' + name + ' (artist)…');
+    try {
+      const res = await fetch('/ha/play-artist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queueId, name, volume: speakerVolume }),
+      });
+      const d = await res.json();
+      if (d.ok) {
+        setStatus('▶ ' + (d.name || name) + ' (artist)');
+        recordRecent({ type: 'artist', name: d.name || name, uri: d.uri, artist: d.name || name, image: d.image || image || null });
         setTimeout(onClose, 900);
       } else setStatus('Error: ' + (d.error || 'unknown'));
     } catch (e) { setStatus('Error: ' + e.message); }
@@ -319,10 +342,9 @@ function MASearchModal({ speakerName, queueId, speakerVolume, onClose, onBeforeP
 
   // A song row: tap the row (or ▶) to play the track; the 🎤 pill plays the artist.
   const TrackRow = ({ t }) => {
-    const trackEntry  = { type: 'track', name: t.name, uri: t.uri, artist: t.artist, artistUri: t.artistUri, image: t.image };
-    const artistEntry = t.artistUri ? { type: 'artist', name: t.artist, uri: t.artistUri, artist: t.artist, image: null } : null;
+    const trackEntry = { type: 'track', name: t.name, uri: t.uri, artist: t.artist, artistUri: t.artistUri, image: t.image };
     return (
-      <div className="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-xl hover:bg-slate-700/60 transition group">
+      <div className="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-xl hover:bg-slate-700/60 transition">
         <button onClick={() => play(trackEntry)} className="flex items-center gap-3 min-w-0 flex-1 text-left">
           <Thumb src={t.image} fallback="🎵" />
           <span className="min-w-0">
@@ -330,8 +352,8 @@ function MASearchModal({ speakerName, queueId, speakerVolume, onClose, onBeforeP
             {t.artist && <span className="block text-slate-400 text-xs truncate">{t.artist}{t.album ? ' · ' + t.album : ''}</span>}
           </span>
         </button>
-        {artistEntry && (
-          <button onClick={() => play(artistEntry)} title={'Play artist: ' + t.artist}
+        {t.artist && (
+          <button onClick={() => playArtistByName(t.artist, t.image)} title={'Play artist: ' + t.artist}
             className="px-2.5 py-1.5 rounded-lg bg-slate-700/70 hover:bg-fuchsia-600 text-slate-200 hover:text-white text-xs font-medium flex-shrink-0 transition">
             🎤
           </button>
@@ -387,7 +409,7 @@ function MASearchModal({ speakerName, queueId, speakerVolume, onClose, onBeforeP
             <span className="text-slate-500 text-sm">🔍</span>
             <input autoFocus value={q} onChange={e => setQ(e.target.value)}
               placeholder="Song or artist…  (e.g. Danny Go)"
-              className="flex-1 bg-transparent text-slate-100 text-sm py-2.5 outline-none placeholder-slate-500" />
+              className="flex-1 min-w-0 w-full bg-transparent text-slate-100 text-sm py-2.5 outline-none placeholder-slate-500" />
             {q && <button onClick={() => setQ('')} className="text-slate-500 hover:text-white text-sm">✕</button>}
           </div>
         </div>
