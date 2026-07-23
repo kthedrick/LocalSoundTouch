@@ -3,6 +3,7 @@
 const http = require('http');
 const { stopQueue, clearQueue, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, setPlayerVolume, getConfig, maPost, resolveQueueRedirect } = require('./maClient');
 const pandoraTracker = require('./pandoraTracker');
+const recentSearches = require('./recentSearches');
 
 // Bose speaker HTTP API port (env override for tests)
 const BOSE_PORT = parseInt(process.env.LST_BOSE_PORT) || 8090;
@@ -556,6 +557,48 @@ async function handleHa(req, res) {
       const stations = (result?.radio || []).map(s => ({ name: s.name, uri: s.uri }));
       ok(res, stations);
     } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/search-music?q=<query> — search MA across all providers for artists + tracks.
+  // Returns { artists:[{name,uri,image}], tracks:[{name,uri,image,artist,artistUri,album}] }.
+  // Backs the "Search" UI: play a specific song (track uri) or play an artist (artist uri).
+  if (url.startsWith('/ha/search-music') && req.method === 'GET') {
+    const q = (new URL('http://x' + url).searchParams.get('q') || '').trim();
+    if (!q) { ok(res, { artists: [], tracks: [] }); return; }
+    try {
+      const imageOf = (o) => {
+        const img = o && o.image;
+        if (!img) return null;
+        return (typeof img === 'string' ? img : img.path) || null;
+      };
+      const result = await maPost('music/search', { search_query: q, media_types: ['artist', 'track'], limit: 12 });
+      const artists = (result?.artists || [])
+        .filter(a => a.uri && a.name)
+        .map(a => ({ name: a.name, uri: a.uri, image: imageOf(a) }));
+      const tracks = (result?.tracks || [])
+        .filter(t => t.uri && t.name)
+        .map(t => {
+          const ar = (t.artists || [])[0] || {};
+          const album = t.album && (typeof t.album === 'string' ? t.album : t.album.name) || '';
+          return { name: t.name, uri: t.uri, image: imageOf(t), artist: ar.name || '', artistUri: ar.uri || null, album };
+        });
+      ok(res, { artists, tracks });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // GET /ha/recent-searches — recently played search items (newest first, deduped by uri)
+  if (url.startsWith('/ha/recent-searches') && req.method === 'GET') {
+    ok(res, { items: recentSearches.list(30) });
+    return;
+  }
+
+  // POST /ha/recent-searches { type, name, uri, artist, artistUri, image } — record a played item
+  if (url === '/ha/recent-searches' && req.method === 'POST') {
+    const body = await readBody(req);
+    const items = recentSearches.add(body);
+    ok(res, { items: items.slice(0, 30) });
     return;
   }
 

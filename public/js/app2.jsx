@@ -254,6 +254,167 @@ function MABrowserModal({ speakerName, queueId, speakerVolume, onClose, onBefore
   );
 }
 
+// ── MASearchModal ─────────────────────────────────────────────────────────────
+// Search any song or artist, then play the track or play the whole artist. Empty query
+// shows recently played items (kids love replaying the same things).
+function MASearchModal({ speakerName, queueId, speakerVolume, onClose, onBeforePlay }) {
+  const [q, setQ]           = useState('');
+  const [data, setData]     = useState(null);   // { artists, tracks } for the active query
+  const [recent, setRecent] = useState(null);   // array of recently played entries
+  const [loading, setLoading] = useState(false);
+  const [error, setError]   = useState(null);
+  const [status, setStatus] = useState(null);
+  const seqRef = useRef(0);
+
+  useEffect(() => { document.body.style.overflow = 'hidden'; return () => { document.body.style.overflow = ''; }; }, []);
+
+  const loadRecent = () => fetch('/ha/recent-searches')
+    .then(r => r.json()).then(d => setRecent(d.items || [])).catch(() => setRecent([]));
+  useEffect(() => { loadRecent(); }, []);
+
+  // Debounced search with a stale-response guard (fast typers can race responses)
+  useEffect(() => {
+    const query = q.trim();
+    if (!query) { setData(null); setLoading(false); setError(null); return; }
+    setLoading(true);
+    const my = ++seqRef.current;
+    const id = setTimeout(() => {
+      fetch('/ha/search-music?q=' + encodeURIComponent(query))
+        .then(r => r.json())
+        .then(d => {
+          if (my !== seqRef.current) return;
+          if (d.ok) { setData({ artists: d.artists || [], tracks: d.tracks || [] }); setError(null); }
+          else setError(d.error || 'Search failed');
+          setLoading(false);
+        })
+        .catch(e => { if (my === seqRef.current) { setError(String(e)); setLoading(false); } });
+    }, 300);
+    return () => clearTimeout(id);
+  }, [q]);
+
+  const play = async (entry) => {
+    if (!entry || !entry.uri) return;
+    const label = entry.type === 'artist' ? entry.name + ' (artist)' : entry.name;
+    if (onBeforePlay) await onBeforePlay();
+    setStatus('Starting ' + label + '…');
+    try {
+      const res = await fetch('/ha/play', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queueId, uri: entry.uri, name: entry.name, volume: speakerVolume }),
+      });
+      const d = await res.json();
+      if (d.ok) {
+        setStatus('▶ ' + label);
+        fetch('/ha/recent-searches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) }).catch(() => {});
+        setTimeout(onClose, 900);
+      } else setStatus('Error: ' + (d.error || 'unknown'));
+    } catch (e) { setStatus('Error: ' + e.message); }
+  };
+
+  const Thumb = ({ src, fallback, round }) => (
+    src
+      ? <img src={src} alt="" className={'w-11 h-11 object-cover flex-shrink-0 ' + (round ? 'rounded-full' : 'rounded-lg')} />
+      : <div className={'w-11 h-11 flex-shrink-0 flex items-center justify-center bg-slate-700 text-lg ' + (round ? 'rounded-full' : 'rounded-lg')}>{fallback}</div>
+  );
+
+  // A song row: tap the row (or ▶) to play the track; the 🎤 pill plays the artist.
+  const TrackRow = ({ t }) => {
+    const trackEntry  = { type: 'track', name: t.name, uri: t.uri, artist: t.artist, artistUri: t.artistUri, image: t.image };
+    const artistEntry = t.artistUri ? { type: 'artist', name: t.artist, uri: t.artistUri, artist: t.artist, image: null } : null;
+    return (
+      <div className="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-xl hover:bg-slate-700/60 transition group">
+        <button onClick={() => play(trackEntry)} className="flex items-center gap-3 min-w-0 flex-1 text-left">
+          <Thumb src={t.image} fallback="🎵" />
+          <span className="min-w-0">
+            <span className="block text-slate-100 text-sm font-medium truncate">{t.name}</span>
+            {t.artist && <span className="block text-slate-400 text-xs truncate">{t.artist}{t.album ? ' · ' + t.album : ''}</span>}
+          </span>
+        </button>
+        {artistEntry && (
+          <button onClick={() => play(artistEntry)} title={'Play artist: ' + t.artist}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-700/70 hover:bg-fuchsia-600 text-slate-200 hover:text-white text-xs font-medium flex-shrink-0 transition">
+            🎤
+          </button>
+        )}
+        <button onClick={() => play(trackEntry)} title="Play song"
+          className="w-9 h-9 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center flex-shrink-0 transition">
+          ▶
+        </button>
+      </div>
+    );
+  };
+
+  const ArtistRow = ({ a }) => {
+    const entry = { type: 'artist', name: a.name, uri: a.uri, artist: a.name, image: a.image };
+    return (
+      <button onClick={() => play(entry)}
+        className="group w-full flex items-center gap-3 pl-3 pr-2 py-1.5 rounded-xl hover:bg-slate-700/60 transition text-left">
+        <Thumb src={a.image} fallback="🎤" round />
+        <span className="min-w-0 flex-1">
+          <span className="block text-slate-100 text-sm font-medium truncate">{a.name}</span>
+          <span className="block text-slate-400 text-xs">Artist</span>
+        </span>
+        <span className="w-9 h-9 rounded-full bg-fuchsia-600 group-hover:bg-fuchsia-500 text-white flex items-center justify-center flex-shrink-0">▶</span>
+      </button>
+    );
+  };
+
+  const RecentRow = ({ e }) => e.type === 'artist'
+    ? <ArtistRow a={{ name: e.name, uri: e.uri, image: e.image }} />
+    : <TrackRow t={{ name: e.name, uri: e.uri, artist: e.artist, artistUri: e.artistUri, image: e.image, album: '' }} />;
+
+  const SectionLabel = ({ children }) => (
+    <h3 className="px-3 pt-3 pb-1 text-slate-400 text-[11px] font-semibold uppercase tracking-wider">{children}</h3>
+  );
+
+  const showRecents = !q.trim();
+  const hasResults  = data && (data.artists.length || data.tracks.length);
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center p-0 pb-10 sm:p-4 z-50" onClick={onClose}>
+      <div className="bg-slate-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] flex flex-col border border-slate-700 shadow-2xl" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700 flex-shrink-0">
+          <div className="min-w-0">
+            <h2 className="text-white font-semibold text-sm">Search Music</h2>
+            <p className="text-blue-400 text-xs truncate">{speakerName}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none flex-shrink-0 ml-2">✕</button>
+        </div>
+        {/* Search field */}
+        <div className="px-4 pt-3 pb-2 flex-shrink-0">
+          <div className="flex items-center gap-2 bg-slate-900/70 border border-slate-700 rounded-xl px-3 focus-within:border-blue-500 transition">
+            <span className="text-slate-500 text-sm">🔍</span>
+            <input autoFocus value={q} onChange={e => setQ(e.target.value)}
+              placeholder="Song or artist…  (e.g. Danny Go)"
+              className="flex-1 bg-transparent text-slate-100 text-sm py-2.5 outline-none placeholder-slate-500" />
+            {q && <button onClick={() => setQ('')} className="text-slate-500 hover:text-white text-sm">✕</button>}
+          </div>
+        </div>
+        {/* Status */}
+        {status && <div className="px-4 py-2 bg-blue-900/30 text-blue-200 text-xs flex-shrink-0">{status}</div>}
+        {/* Body */}
+        <div className="overflow-y-auto flex-1 px-1 pb-3">
+          {showRecents && (
+            recent === null ? <div className="px-4 py-8 text-center text-slate-500 text-sm">Loading…</div>
+            : recent.length === 0 ? <div className="px-4 py-10 text-center text-slate-500 text-sm">Search for a song or artist to get started.</div>
+            : <><SectionLabel>Recently Played</SectionLabel>{recent.map((e, i) => <RecentRow key={i} e={e} />)}</>
+          )}
+          {!showRecents && (
+            <>
+              {loading && !data && <div className="px-4 py-8 text-center text-slate-500 text-sm">Searching…</div>}
+              {error && <div className="px-4 py-4 text-red-400 text-sm">{error}</div>}
+              {data && !hasResults && !loading && <div className="px-4 py-10 text-center text-slate-500 text-sm">No results for “{q.trim()}”.</div>}
+              {data && data.artists.length > 0 && <><SectionLabel>Artists</SectionLabel>{data.artists.map((a, i) => <ArtistRow key={i} a={a} />)}</>}
+              {data && data.tracks.length > 0 && <><SectionLabel>Songs</SectionLabel>{data.tracks.map((t, i) => <TrackRow key={i} t={t} />)}</>}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── NasBrowserModal ───────────────────────────────────────────────────────────
 function NasBrowserModal({ speakerIp, speakerName, speakerVolume, onClose, initialPath, onBeforePlay, queueId, maFilesystemBase }) {
   const [serverBase, setServerBase] = useState('');
@@ -1237,6 +1398,7 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
   const [artModal, setArtModal] = useState(false);
   const [favStatus, setFavStatus] = useState(null);
   const [radioBrowser, setRadioBrowser] = useState(false);
+  const [musicSearch, setMusicSearch]   = useState(false);
   const [localPlaylists, setLocalPlaylists] = useState([]);
   const [playlistPlayStatus, setPlaylistPlayStatus] = useState(null);
   const [soundSettingsSpk, setSoundSettingsSpk] = useState(null);
@@ -1606,6 +1768,10 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
       <div className="px-4 py-3 border-t border-slate-700/60">
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Music Assistant</h3>
         <div className="flex gap-1.5 flex-wrap items-center">
+          <button onClick={() => setMusicSearch(true)}
+            className="px-3 py-1.5 bg-gradient-to-r from-blue-600 to-fuchsia-600 hover:from-blue-500 hover:to-fuchsia-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5">
+            <span>🔍</span><span>Search</span>
+          </button>
           <button onClick={() => setRadioBrowser(true)}
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition">
             Browse
@@ -1768,6 +1934,17 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
         </div>
       )}
 
+
+      {/* MA search modal */}
+      {musicSearch && (
+        <MASearchModal
+          speakerName={master?.name || group.masterIp}
+          queueId={haConfig?.speakerQueues?.[master?.name] || haConfig?.queues?.airplayGroup}
+          speakerVolume={master?.volume}
+          onClose={() => setMusicSearch(false)}
+          onBeforePlay={async () => { await maybeAdopt(); await onEstablishGroup(group.masterIp); }}
+        />
+      )}
 
       {/* MA library browser modal */}
       {radioBrowser && (
