@@ -65,6 +65,7 @@ The `/ha/group-state` handler uses: "any entity that has OTHER known entities in
 - `playRedirects` catches this queue on every play path (`/ha/play`, playlist/album-once routes — via `applyRedirect` in haHandler) and redirects to Belkin queue (`upuuidff970010315bf140af4f0142ff970010`) + switches Bose to AUX1
 - `speakerEntities["Bose-Bedroom"]` = Belkin entity (`bose_bathroom2`) — used for MA grouping
 - When included in a group, `group-include` also fires `boseSwitchInput` to switch the Bose to AUX1
+- **WCRB-on-Bedroom fix (2026-09-23):** (1) AUX switch now targets Bedroom's *discovered* IP (by name); `playRedirects[].boseSwitchInput.ip` is only a fallback — stale IP made the switch fail silently (logged only) → Belkin played to nobody → boseWatcher phantom-stopped it. Log `[redirect] … is stale` = update haConfig. (2) Preset press on Bedroom: Bose's dead-cloud attempt lands AFTER our AUX switch; boseWatcher now re-selects AUX1 for 30s after the intercept (`presetGuard`) instead of treating it as phantom.
 
 ---
 

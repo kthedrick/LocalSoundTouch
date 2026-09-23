@@ -100,12 +100,27 @@ function err(res, msg)  { res.writeHead(500, { 'Content-Type': 'application/json
 async function applyRedirect(queueId) {
   const { queueId: resolved, redirect } = resolveQueueRedirect(queueId);
   if (redirect?.boseSwitchInput) {
-    const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
+    const { source, sourceAccount = '' } = redirect.boseSwitchInput;
+    const ip = redirectSwitchIp(redirect);
     console.log('[redirect] switching %s to input %s, playing on %s', ip, source, resolved);
     await boseSwitchInput(ip, source, sourceAccount).catch(e =>
       console.error('[redirect] boseSwitchInput error:', e.message));
   }
   return resolved;
+}
+
+// IP of the Bose a playRedirect switches. Prefer the live discovered IP for
+// redirect.speakerName — the configured boseSwitchInput.ip goes stale on DHCP
+// changes, and a failed switch is only logged, so the Belkin plays into an AUX
+// nobody is listening to (then boseWatcher stops it as phantom).
+function redirectSwitchIp(redirect) {
+  const live = require('./speakerDiscovery').getSpeakers()
+    .find(s => s.name === redirect.speakerName)?.ip;
+  const cfgIp = redirect.boseSwitchInput?.ip;
+  if (live && cfgIp && live !== cfgIp) {
+    console.warn('[redirect] %s: haConfig boseSwitchInput.ip %s is stale, using discovered %s', redirect.speakerName, cfgIp, live);
+  }
+  return live || cfgIp;
 }
 
 // Switch a Bose speaker to a specific input via its local HTTP API
@@ -1195,7 +1210,8 @@ async function handleHa(req, res) {
     for (const speakerName of names) {
       const redirect = (cfg2.playRedirects || []).find(r => r.speakerName === speakerName && r.boseSwitchInput);
       if (redirect) {
-        const { ip, source, sourceAccount = '' } = redirect.boseSwitchInput;
+        const { source, sourceAccount = '' } = redirect.boseSwitchInput;
+        const ip = redirectSwitchIp(redirect);
         boseSwitchInput(ip, source, sourceAccount)
           .then(() => console.log('[group-include] switched %s to %s', ip, source))
           .catch(e => console.error('[group-include] boseSwitchInput error:', e.message));

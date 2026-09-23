@@ -19,13 +19,17 @@ const http   = require('http');
 const crypto = require('crypto');
 const { getConfig } = require('./maClient');
 
-const WS_PORT      = 8080;
+const WS_PORT      = parseInt(process.env.LST_BOSE_WS_PORT) || 8080;
+const BOSE_PORT    = parseInt(process.env.LST_BOSE_PORT) || 8090;
 const RECONNECT_MS = 20000;
 const POLL_MS      = 60000;
 const PING_MS      = 30000;  // heartbeat — Bose replies with pong (verified)
 const STALE_MS     = 75000;  // no bytes (events or pongs) this long → half-open, reconnect
 
-const lastSource = {}; // name → last polled source (for fallback)
+const PRESET_GUARD_MS = 30000; // after a preset intercept on an AUX-redirect speaker
+
+const lastSource  = {}; // name → last polled source (for fallback)
+const presetGuard = {}; // name → { until, ip } — re-assert redirect input after a preset press
 
 // ── Bose HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -50,6 +54,20 @@ function playFallback(ip, name, uri) {
   haPlay(queueId, uri)
     .then(() => console.log(`[boseWatcher] ${name}: play sent`))
     .catch(e => console.error(`[boseWatcher] ${name}: play failed:`, e.message));
+}
+
+function boseSelect(ip, source, sourceAccount = '') {
+  return new Promise((resolve, reject) => {
+    const body = `<ContentItem source="${source}" sourceAccount="${sourceAccount}" type="ad" location="" isPresetable="false"/>`;
+    const req  = http.request({
+      hostname: ip, port: BOSE_PORT, path: '/select', method: 'POST', timeout: 5000,
+      headers: { 'Content-Type': 'application/xml', 'Content-Length': Buffer.byteLength(body) },
+    }, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Bose /select timeout: ' + ip)));
+    req.write(body);
+    req.end();
+  });
 }
 
 // ── WebSocket frame parser ─────────────────────────────────────────────────────
@@ -104,6 +122,12 @@ function handleWsEvent(ip, name, xml) {
     const uri      = cfg.presetActions?.[name]?.[presetId];
     if (!uri) return;
     console.log(`[boseWatcher] ${name}: preset ${presetId} pressed → playing ${uri}`);
+    // AUX-redirect speaker (Bose-Bedroom → Belkin): the Bose keeps trying the dead
+    // cloud preset after /ha/play switched it to AUX, and its late source change
+    // (INVALID_SOURCE / TUNEIN…) leaves it off AUX or reads as phantom → Belkin
+    // stopped. Guard a window where we re-assert AUX instead.
+    const redirect = (cfg.playRedirects || []).find(r => r.speakerName === name && r.boseSwitchInput?.source);
+    if (redirect) presetGuard[name] = { until: Date.now() + PRESET_GUARD_MS, ip };
     playFallback(ip, name, uri);
     return;
   }
@@ -122,7 +146,18 @@ function handleWsEvent(ip, name, xml) {
     const expectedSource = redirect?.boseSwitchInput?.source;
     const isReceivingMA  = expectedSource ? source === expectedSource : source === 'AIRPLAY';
 
-    if (isReceivingMA || source === 'INVALID_SOURCE') return;
+    if (isReceivingMA) return;
+
+    const guard = presetGuard[name];
+    if (guard && Date.now() < guard.until && expectedSource && source !== 'STANDBY') {
+      const { source: src, sourceAccount = '' } = redirect.boseSwitchInput;
+      console.log(`[boseWatcher] ${name}: ${source} after preset intercept — re-selecting ${src} ${sourceAccount}`);
+      boseSelect(guard.ip, src, sourceAccount).catch(e =>
+        console.error(`[boseWatcher] ${name}: re-select ${src} failed:`, e.message));
+      return;
+    }
+
+    if (source === 'INVALID_SOURCE') return;
 
     const isPhantom = source === 'STANDBY' || (expectedSource && source !== expectedSource);
     if (isPhantom) {
@@ -426,4 +461,4 @@ function start(getSpeakers) {
   console.log(`[boseWatcher] watching ${Object.keys(watchers).length} speakers (WS + poll, resync 60s)`);
 }
 
-module.exports = { start, getSources: () => lastSource, parseFrames, pingFrame };
+module.exports = { start, getSources: () => lastSource, parseFrames, pingFrame, handleWsEvent };
