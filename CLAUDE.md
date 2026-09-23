@@ -183,6 +183,16 @@ Flow in `joinSpeakerNow` / `doStopJoinRestart` (app2.jsx):
 
 ## Future Enhancements
 
+### ⏭ NEXT SESSION — revisit these two first (added 2026-09-22)
+
+**1. Dependency status line in the app.** User wants a glanceable health line — their trigger to come fix things ("works until it doesn't"; wife expects TV/soundbar to just work). Extend the existing `/ha/ma-health` banner pattern to: MA up, Apple Music token, LG TV entity (flag `unavailable` while Apple TV `playing` = TV on but HA blind — would have caught the Sep 8 break day one), per-speaker boseWatcher WS connected/stale, tvWatcher last trigger. Keep it quiet when all green. Phone push alerts via HA notify = possible later add-on, not requested.
+
+**2. Pi SD-card failure → restore runbook.** User worried about the flash card dying. Walk them through a restore (don't do it unasked). Current state (verified 2026-09-22):
+- HA automatic backups: weekly (Sun), keep 3, **encrypted**, to `hassio.local` (on the SD card — dies with it) **and Backblaze B2** (offsite — the one that matters). Include all add-ons (LocalSoundTouch + MA data) + HA database.
+- Restore = flash fresh HA OS to new card/SSD → onboarding "Restore from backup" → pull from B2 (re-add B2 creds) → needs the **backup encryption key** (HA Settings → System → Backups → encryption key / emergency kit). Confirm user has that key stored OFF the Pi — without it the B2 backups are useless.
+- Not in HA backups / check: `haConfig.json` + `nasConfig.json` are git-ignored (live on Pi + this laptop only) — the add-on backup likely covers them but verify, or keep a copy with the key. Add-on source is in GitHub; `deploy.sh` redeploys. SSH add-on public key must be re-added.
+- Suggest: do a trial restore-download (verify a B2 backup decrypts), consider moving HA to USB SSD (far more durable than SD).
+
 ### MA Search
 MA has a `music/search` command (`{ search_query, media_types, limit }`) that searches across all providers including Apple Music. Could add a search box to MABrowserModal to surface this.
 
