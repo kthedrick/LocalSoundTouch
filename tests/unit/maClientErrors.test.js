@@ -29,3 +29,34 @@ test('maPost: connection refused → "check Music Assistant" error, never blank'
     },
   );
 });
+
+test('maPost: timeout → "slow to respond", not "unreachable"', async () => {
+  // Accepts the connection but never replies
+  const sockets = [];
+  const srv = net.createServer(s => sockets.push(s));
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  fixtures.writeHaConfig({ mockPort: srv.address().port });
+  process.env.LST_MA_TIMEOUT_MS = '200';
+  const { maPost } = require('../../maClient');
+  try {
+    await assert.rejects(
+      () => maPost('player_queues/play_media', {}),
+      (e) => {
+        assert.match(e.message, /slow to respond/);
+        assert.match(e.message, /may still start/);
+        assert.doesNotMatch(e.message, /unreachable/);
+        assert.equal(e.code, 'MA_TIMEOUT');
+        return true;
+      },
+    );
+  } finally {
+    delete process.env.LST_MA_TIMEOUT_MS;
+    sockets.forEach(s => s.destroy());
+    await new Promise(r => srv.close(r));
+  }
+});
+
+test('play_media gets a longer timeout than other MA commands', () => {
+  const { SLOW_COMMANDS } = require('../../maClient');
+  assert.ok(SLOW_COMMANDS['player_queues/play_media'] >= 20000);
+});

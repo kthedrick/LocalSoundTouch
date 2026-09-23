@@ -97,7 +97,7 @@ function start(getSpeakers) {
       // Log availability changes: an 'unavailable' LG entity (e.g. lost webOS pairing)
       // reads as off forever, silently disabling auto-switch.
       if ((state.state === 'unavailable') !== (lastTvState === 'unavailable')) {
-        if (state.state === 'unavailable') console.warn('[tvWatcher] %s is unavailable in HA — auto-switch disabled until it returns (webOS pairing lost? re-add LG integration)', tv.lgTvEntity);
+        if (state.state === 'unavailable') console.warn('[tvWatcher] %s unavailable in HA (normal ~30s after TV off; if TV is ON, webOS pairing is lost — re-add LG integration)', tv.lgTvEntity);
         else if (lastTvState !== null) console.log('[tvWatcher] %s available again (%s)', tv.lgTvEntity, state.state);
       }
       lastTvState = state.state;

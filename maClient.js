@@ -32,6 +32,11 @@ function resolveQueueRedirect(queueId) {
   return redirect ? { queueId: redirect.toQueue, redirect } : { queueId, redirect: null };
 }
 
+// play_media can take >10s right after an MA restart (cold provider/stream setup) yet
+// still succeed — a short timeout reported a false failure while music started.
+const SLOW_COMMANDS = { 'player_queues/play_media': 25000 };
+const DEFAULT_TIMEOUT_MS = 10000;
+
 async function maPost(command, args) {
   const cfg = getConfig();
   if (!cfg.maToken || cfg.maToken === 'YOUR_MA_TOKEN_HERE') {
@@ -60,11 +65,20 @@ async function maPost(command, args) {
         catch (e) { resolve(data); }
       });
     });
-    req.setTimeout(10000, () => req.destroy(new Error('MA request timeout: ' + command)));
+    const timeoutMs = parseInt(process.env.LST_MA_TIMEOUT_MS) || SLOW_COMMANDS[command] || DEFAULT_TIMEOUT_MS;
+    let timedOut = false;
+    req.setTimeout(timeoutMs, () => { timedOut = true; req.destroy(new Error('MA request timeout: ' + command)); });
     // Wrap connection failures in an actionable message. Raw errors can be
     // AggregateErrors with an EMPTY .message (Node tries IPv4+IPv6, both refused),
     // which made the 2026-07-18 "MA add-on stopped" outage log as blank errors.
     req.on('error', (e) => {
+      // Timeout ≠ outage: MA accepted the connection but is slow. The command may still
+      // complete, so don't tell the user MA is down.
+      if (timedOut) {
+        const slow = new Error(`Music Assistant is slow to respond (no reply in ${timeoutMs / 1000}s) — it may still start. [${command}]`);
+        slow.code = 'MA_TIMEOUT';
+        return reject(slow);
+      }
       const detail = e.message || (e.errors || []).map(x => x.message || x.code).join('; ') || e.code || String(e);
       const friendly = new Error(`Music Assistant unreachable (${maUrl.hostname}:${parseInt(maUrl.port) || 8095}) — check that the Music Assistant add-on is running. [${command}: ${detail}]`);
       friendly.code = e.code || 'MA_UNREACHABLE';
@@ -93,4 +107,4 @@ const getAllQueues  = ()                              => maPost('player_queues/a
 const playMedia        = (queueId, uri)                  => maPost('player_queues/play_media',    { queue_id: queueId, media: uri, option: 'play' });
 const setPlayerVolume  = (playerId, volume)              => maPost('players/cmd/volume',           { player_id: playerId, volume: Math.round(volume) });
 
-module.exports = { maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, setPlayerVolume, reloadConfig, getConfig, resolveQueueRedirect };
+module.exports = { SLOW_COMMANDS, maPost, stopQueue, clearQueue, stopPlayer, getAllPlayers, groupPlayer, ungroupPlayer, setMembers, pauseQueue, resumeQueue, nextTrack, prevTrack, getAllQueues, playMedia, setPlayerVolume, reloadConfig, getConfig, resolveQueueRedirect };
