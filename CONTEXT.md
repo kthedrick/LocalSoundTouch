@@ -422,7 +422,7 @@ Problem: `deploy.sh` needs home LAN + the laptop's SSH key. Cloud/mobile Claude 
 **Leaning (user, 2026-09-23): Option 2 + revert.** Single instance, everything in git → in-app Update button is the cleanest. Design notes for when it's built:
 - Deploy target = any ref (branch / tag / SHA), not just latest. UI lists recent commits (GitHub API) + CI status per commit.
 - Record deploy history in `/data/deploys.json` (`{ sha, ref, at, ok }`); mark "last known good" after the new build starts + `/ha/ma-health` responds.
-- **Revert** = redeploy a previous SHA from that history (same code path as update). One-tap "Revert to last good".
+- **Revert** = redeploy ANY earlier version (SHA from history or git log) — same code path as update. Plus one-tap "Revert to last good".
 - Safety net if a bad build kills the app (and its button): Option 4 shell (`pi-update.sh <good-sha>`) or `deploy.sh` from laptop. Consider a tiny separate watchdog/updater (HA automation or second add-on) later if that becomes a real problem.
 - Revert caveat: code rollback doesn't roll back `haConfig.json` — keep config changes backward-compatible (additive keys).
 
