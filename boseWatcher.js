@@ -22,6 +22,8 @@ const { getConfig } = require('./maClient');
 const WS_PORT      = 8080;
 const RECONNECT_MS = 20000;
 const POLL_MS      = 60000;
+const PING_MS      = 30000;  // heartbeat — Bose replies with pong (verified)
+const STALE_MS     = 75000;  // no bytes (events or pongs) this long → half-open, reconnect
 
 const lastSource = {}; // name → last polled source (for fallback)
 
@@ -82,6 +84,14 @@ function parseFrames(buf) {
   return { frames, remaining: buf.slice(offset) };
 }
 
+// Masked client ping frame (clients must mask). Without traffic from our side a
+// connection the speaker silently dropped stays ESTABLISHED forever — no 'close',
+// no reconnect, presets stop intercepting.
+function pingFrame() {
+  const mask = crypto.randomBytes(4);
+  return Buffer.concat([Buffer.from([0x89, 0x80]), mask]);
+}
+
 // ── WebSocket event handler ───────────────────────────────────────────────────
 
 function handleWsEvent(ip, name, xml) {
@@ -131,14 +141,15 @@ function handleWsEvent(ip, name, xml) {
 // ── WebSocket connection ──────────────────────────────────────────────────────
 
 function watchSpeakerWs(ip, name) {
-  let buf = Buffer.alloc(0), handshakeDone = false, reconnectTimer;
-  let stopped = false, socket = null;
+  let buf = Buffer.alloc(0), handshakeDone = false, reconnectTimer, pingTimer;
+  let stopped = false, socket = null, lastRx = 0;
 
   function connect() {
     if (stopped) return;
-    buf = Buffer.alloc(0); handshakeDone = false;
+    buf = Buffer.alloc(0); handshakeDone = false; lastRx = Date.now();
 
     socket = net.createConnection({ host: ip, port: WS_PORT }, () => {
+      socket.setKeepAlive(true, 30000);
       const key  = crypto.randomBytes(16).toString('base64');
       const hs   = [
         'GET / HTTP/1.1',
@@ -157,6 +168,7 @@ function watchSpeakerWs(ip, name) {
     });
 
     socket.on('data', chunk => {
+      lastRx = Date.now();
       try {
         buf = Buffer.concat([buf, chunk]);
         if (!handshakeDone) {
@@ -179,9 +191,21 @@ function watchSpeakerWs(ip, name) {
       }
     });
 
+    const sock = socket;
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+      if (Date.now() - lastRx > STALE_MS) {
+        console.log(`[boseWatcher] ${name}: WS stale (no data ${Math.round((Date.now() - lastRx) / 1000)}s), reconnecting`);
+        sock.destroy();
+        return;
+      }
+      if (handshakeDone) { try { sock.write(pingFrame()); } catch (_) {} }
+    }, PING_MS);
+
     socket.on('error', () => {});
     socket.on('close', () => {
       if (handshakeDone) console.log(`[boseWatcher] ${name}: WS disconnected`);
+      clearInterval(pingTimer);
       clearTimeout(reconnectTimer);
       if (!stopped) reconnectTimer = setTimeout(connect, RECONNECT_MS);
     });
@@ -191,6 +215,7 @@ function watchSpeakerWs(ip, name) {
   return () => {
     stopped = true;
     clearTimeout(reconnectTimer);
+    clearInterval(pingTimer);
     try { socket?.destroy(); } catch (_) {}
   };
 }
@@ -401,4 +426,4 @@ function start(getSpeakers) {
   console.log(`[boseWatcher] watching ${Object.keys(watchers).length} speakers (WS + poll, resync 60s)`);
 }
 
-module.exports = { start, getSources: () => lastSource, parseFrames };
+module.exports = { start, getSources: () => lastSource, parseFrames, pingFrame };

@@ -193,6 +193,7 @@ async function addToPlaylist(maPost, stationName, artist, title, album) {
 
 // Retry Apple Music resolution for every persisted track missing an appleUri. Runs on a
 // timer and can be invoked on demand. Fills in appleUri/album and syncs to the MA playlist.
+let lastStillMissing = 0;
 async function resolveUnresolved(maPost) {
   const data = loadData();
   let resolved = 0, stillMissing = 0;
@@ -218,7 +219,9 @@ async function resolveUnresolved(maPost) {
     }
   }
   if (resolved) saveData(data);
-  if (resolved || stillMissing) console.log('[pandoraTracker] resolveUnresolved: %d resolved, %d still missing', resolved, stillMissing);
+  // Log only on progress or a changed backlog — an unchanged count every cycle is noise
+  if (resolved || stillMissing !== lastStillMissing) console.log('[pandoraTracker] resolveUnresolved: %d resolved, %d still missing', resolved, stillMissing);
+  lastStillMissing = stillMissing;
   return { resolved, stillMissing };
 }
 

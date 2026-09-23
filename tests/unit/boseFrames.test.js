@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { parseFrames } = require('../../boseWatcher');
+const { parseFrames, pingFrame } = require('../../boseWatcher');
 
 // Build a WebSocket frame: FIN + opcode, optional mask, payload
 function frame(payload, { opcode = 0x1, masked = false, ext16 = false } = {}) {
@@ -66,4 +66,17 @@ test('non-text opcodes consumed but not returned', () => {
 test('continuation opcode (0x0) treated as text', () => {
   const { frames } = parseFrames(frame('cont', { opcode: 0x0 }));
   assert.deepEqual(frames, ['cont']);
+});
+
+test('pingFrame is a masked, empty, FIN ping (client frames must be masked)', () => {
+  const f = pingFrame();
+  assert.equal(f.length, 6);
+  assert.equal(f[0], 0x89);          // FIN + opcode 0x9
+  assert.equal(f[1], 0x80);          // mask bit, zero length
+});
+
+test('pong frames are consumed but not emitted as text', () => {
+  const { frames, remaining } = parseFrames(Buffer.concat([frame('', { opcode: 0xA }), frame('<updates/>')]));
+  assert.deepEqual(frames, ['<updates/>']);
+  assert.equal(remaining.length, 0);
 });

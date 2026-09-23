@@ -66,8 +66,11 @@ async function scan() {
       const results = await Promise.all(batch.map(probe));
       results.forEach(r => { if (r) wiims.push(r); });
     }
+    // Log only when the found set changes — periodic rescans otherwise flood the add-on log
+    const ips = wiims.map(w => w.ip).join(', ');
+    const changed = !cache.scannedAt || ips !== cache.wiims.map(w => w.ip).join(', ');
     cache = { scannedAt: Date.now(), wiims };
-    console.log(`[wiimDiscovery] scan done — found ${wiims.length} WiiM(s) at [${wiims.map(w => w.ip).join(', ')}]`);
+    if (changed) console.log(`[wiimDiscovery] scan done — found ${wiims.length} WiiM(s) at [${wiims.map(w => w.ip).join(', ')}]`);
   } catch (e) {
     console.error('[wiimDiscovery] error:', e.message);
   } finally {
