@@ -388,6 +388,29 @@ ssh root@homeassistant "ha apps start local_localsoundtouch 2>/dev/null || true"
 - **haConfig.json** is git-ignored and IS excluded from deploy.sh. Must be deployed separately: `ssh -p 22222 root@homeassistant "cat > /addons/localsoundtouch/haConfig.json" < haConfig.json` followed by `ha apps rebuild local_localsoundtouch`. The Pi's copy is authoritative.
 - **MA reachable as `localhost`** — MA runs on the same Pi; Docker host networking makes `localhost:8095` work
 
+### Deploying without the laptop — options (added 2026-09-23, none built yet)
+
+Problem: `deploy.sh` needs home LAN + the laptop's SSH key. Cloud/mobile Claude sessions can't reach the Pi, so they can commit/push but not deploy.
+
+**Current workaround:** run `claude remote-control` (or Claude Desktop) on the laptop, in the repo folder → session appears in the Claude Code mobile app and can run `deploy.sh`. Laptop must stay on + awake.
+
+**Option 1 — HA add-on repository from GitHub (native HA path)**
+- Add the GitHub repo in HA → App Store → Repositories; Supervisor builds the add-on from it.
+- Release = bump `version` in `config.yaml` + push → "Update" button appears in HA (phone app works).
+- Cons: private repos may not be supported by Supervisor; `haConfig.json` isn't in git → must move to add-on options or `/data`; different slug → one-time reinstall.
+
+**Option 2 — self-update endpoint in LocalSoundTouch (recommended)**
+- `config.yaml`: `hassio_api: true`, `hassio_role: manager`, `map: [addons:rw]`.
+- UI button / `POST /admin/update`: download branch tarball from GitHub (token if repo private) → unpack over `/addons/localsoundtouch`, preserving `haConfig.json`, `nasConfig.json`, `tests.json` → Supervisor rebuild of self (`local_localsoundtouch`).
+- Gate: add GitHub Actions running `node --test`; only deploy a commit whose CI is green (replaces deploy.sh's local test gate).
+- Deploy on tap, not auto-on-push — TV/soundbar must "just work."
+- Risk: a broken build can break the button itself → `deploy.sh` stays as fallback.
+- Flow from any session incl. cloud: push → CI green → tap Update on phone.
+
+**Option 3 — Tailscale add-on on the Pi**
+- Laptop (and remote-control sessions on it) can deploy from anywhere, not just home LAN.
+- Doesn't help cloud sessions — they still can't reach the Pi.
+
 ---
 
 ## HA Integration Housekeeping (May 2026)
