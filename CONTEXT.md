@@ -411,6 +411,21 @@ Problem: `deploy.sh` needs home LAN + the laptop's SSH key. Cloud/mobile Claude 
 - Laptop (and remote-control sessions on it) can deploy from anywhere, not just home LAN.
 - Doesn't help cloud sessions — they still can't reach the Pi.
 
+**Option 4 — phone shell + `pi-update.sh` on the Pi (manual Option 2)**
+- Shell from phone while on home LAN: HA app → sidebar "Terminal" (Advanced SSH & Web Terminal ingress), or SSH app (Termius/Blink iOS; Termius/JuiceSSH Android) → `root@homeassistant:22222` (add phone's pubkey to SSH add-on config).
+- `deploy.sh` itself can't run there (expects laptop: local repo + node, pushes over SSH). Instead pull on the Pi:
+  `cd /addons/localsoundtouch && git pull && ha apps rebuild local_localsoundtouch`
+- One-time: convert `/addons/localsoundtouch` into a git checkout (untracked `haConfig.json`/`nasConfig.json`/`tests.json` survive `git pull`); GitHub deploy key if repo private; confirm `git` exists in SSH add-on (unverified).
+- Could wrap as `pi-update.sh <branch|sha>`: fetch → checkout → rebuild → start.
+- Cons: no local test gate (only deploy branches CI already passed); still needs phone at home.
+
+**Leaning (user, 2026-09-23): Option 2 + revert.** Single instance, everything in git → in-app Update button is the cleanest. Design notes for when it's built:
+- Deploy target = any ref (branch / tag / SHA), not just latest. UI lists recent commits (GitHub API) + CI status per commit.
+- Record deploy history in `/data/deploys.json` (`{ sha, ref, at, ok }`); mark "last known good" after the new build starts + `/ha/ma-health` responds.
+- **Revert** = redeploy a previous SHA from that history (same code path as update). One-tap "Revert to last good".
+- Safety net if a bad build kills the app (and its button): Option 4 shell (`pi-update.sh <good-sha>`) or `deploy.sh` from laptop. Consider a tiny separate watchdog/updater (HA automation or second add-on) later if that becomes a real problem.
+- Revert caveat: code rollback doesn't roll back `haConfig.json` — keep config changes backward-compatible (additive keys).
+
 ---
 
 ## HA Integration Housekeeping (May 2026)
