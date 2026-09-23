@@ -11,6 +11,7 @@ const http = require('http');
 const { getConfig } = require('./maClient');
 
 let prev = { on: null, appleWatching: null };  // null = first poll (no transition yet)
+let lastTvState = null;  // raw HA state, for logging availability changes
 
 function haGet(path) {
   const cfg = getConfig();
@@ -89,7 +90,17 @@ function start(getSpeakers) {
       if (!cfg.features?.tvAutoSwitch) return;
 
       const state = await haGet('/api/states/' + tv.lgTvEntity);
-      if (!state) return;
+      // No state string (HA starting, or entity deleted → {message:'Entity not found.'})
+      // is unknown, not on — skip the poll so it can't fake an off→on transition.
+      if (typeof state?.state !== 'string') return;
+
+      // Log availability changes: an 'unavailable' LG entity (e.g. lost webOS pairing)
+      // reads as off forever, silently disabling auto-switch.
+      if ((state.state === 'unavailable') !== (lastTvState === 'unavailable')) {
+        if (state.state === 'unavailable') console.warn('[tvWatcher] %s is unavailable in HA — auto-switch disabled until it returns (webOS pairing lost? re-add LG integration)', tv.lgTvEntity);
+        else if (lastTvState !== null) console.log('[tvWatcher] %s available again (%s)', tv.lgTvEntity, state.state);
+      }
+      lastTvState = state.state;
 
       const isOn = state.state !== 'off' && state.state !== 'unavailable' && state.state !== 'unknown';
       const source = state.attributes?.source || '';
