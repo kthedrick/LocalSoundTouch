@@ -1,9 +1,16 @@
-// tvWatcher.js — watches LG TV via HA, auto-switches releaseToTV speakers to TV input on power-on
+// tvWatcher.js — watches the LG TV via HA and auto-switches releaseToTV speakers to
+// the TV (PRODUCT/TV) input when the user starts watching. Two triggers:
+//   1. LG powers on (off→on) — any source.
+//   2. The Apple TV starts PLAYING while the TV is on and showing it — i.e. the user
+//      hit play on a show. Keyed off the Apple TV player state (not the LG input
+//      source), because the source is already "Apple TV" while browsing an app; only
+//      the player going to `playing` marks the actual start of watching.
+// Each trigger stops+clears the MA queue first so AirPlay can't re-grab the speaker.
 
 const http = require('http');
 const { getConfig } = require('./maClient');
 
-let prevTvState = null;  // 'on' | 'off' | null — null = first poll (no transition)
+let prev = { on: null, appleWatching: null };  // null = first poll (no transition yet)
 
 function haGet(path) {
   const cfg = getConfig();
@@ -38,6 +45,41 @@ function switchToTV(ip) {
   });
 }
 
+// Decide whether a poll transition should switch the soundbar to TV input. Pure so it
+// can be unit-tested. `prev`/`curr` = { on: bool|null, appleWatching: bool|null }.
+// appleWatching = LG on AND showing Apple TV AND the Apple TV player is `playing`.
+// Returns a human-readable reason string, or null for no action.
+function switchReason(p, curr) {
+  if (!curr.on) return null;                                   // TV off → nothing to do
+  if (p.on === false) return 'LG TV turned on';               // off → on (any source)
+  if (curr.appleWatching && p.appleWatching === false) return 'Apple TV playback started';  // hit play on a show
+  return null;
+}
+
+// Stop+clear each releaseToTV speaker's MA queue, then select its TV input.
+async function switchReleaseSpeakersToTV(cfg, getSpeakers, reason) {
+  console.log('[tvWatcher] %s — switching soundbar(s) to TV input', reason);
+  const { stopQueue, clearQueue } = require('./maClient');
+  const hybrid   = require('./hybridOrchestrator');
+  const speakers = getSpeakers();
+
+  for (const name of (cfg.releaseToTV || [])) {
+    const spk = speakers.find(s => s.name === name);
+    if (!spk?.ip) { console.warn('[tvWatcher] no IP for', name); continue; }
+
+    const queueId = cfg.speakerQueues?.[name];
+    if (queueId) {
+      hybrid.stop(queueId);
+      await stopQueue(queueId).catch(() => {});
+      await clearQueue(queueId).catch(() => {});
+    }
+    // Wait for the Bose to settle out of INVALID_SOURCE after the AirPlay drop
+    await new Promise(r => setTimeout(r, parseInt(process.env.LST_TVINPUT_SETTLE_MS) || 3000));
+    await switchToTV(spk.ip);
+    console.log('[tvWatcher] %s → TV input', name);
+  }
+}
+
 function start(getSpeakers) {
   setInterval(async () => {
     try {
@@ -50,36 +92,25 @@ function start(getSpeakers) {
       if (!state) return;
 
       const isOn = state.state !== 'off' && state.state !== 'unavailable' && state.state !== 'unknown';
-      const cur  = isOn ? 'on' : 'off';
+      const source = state.attributes?.source || '';
 
-      if (prevTvState === 'off' && cur === 'on') {
-        console.log('[tvWatcher] LG TV turned on — auto-switching soundbar to TV input');
-        const { stopQueue, clearQueue } = require('./maClient');
-        const hybrid   = require('./hybridOrchestrator');
-        const speakers = getSpeakers();
-
-        for (const name of (cfg.releaseToTV || [])) {
-          const spk = speakers.find(s => s.name === name);
-          if (!spk?.ip) { console.warn('[tvWatcher] no IP for', name); continue; }
-
-          const queueId = cfg.speakerQueues?.[name];
-          if (queueId) {
-            hybrid.stop(queueId);
-            await stopQueue(queueId).catch(() => {});
-            await clearQueue(queueId).catch(() => {});
-          }
-          // Wait for Bose to settle out of INVALID_SOURCE after AirPlay drop
-          await new Promise(r => setTimeout(r, 3000));
-          await switchToTV(spk.ip);
-          console.log('[tvWatcher] %s → TV input', name);
-        }
+      // Only when the TV is on and showing the Apple TV, check whether it's actually
+      // playing — that (not the input source) is the "started watching" signal.
+      let appleWatching = false;
+      if (isOn && tv.appleTvSource && source === tv.appleTvSource && tv.appleTvEntity) {
+        const at = await haGet('/api/states/' + tv.appleTvEntity);
+        appleWatching = at?.state === 'playing';
       }
+      const curr = { on: isOn, appleWatching };
 
-      prevTvState = cur;
+      const reason = switchReason(prev, curr);
+      if (reason) await switchReleaseSpeakersToTV(cfg, getSpeakers, reason);
+
+      prev = curr;
     } catch (e) {
       console.error('[tvWatcher] error:', e.message);
     }
-  }, 10000);
+  }, parseInt(process.env.LST_TVWATCH_POLL_MS) || 4000);
 }
 
-module.exports = { start };
+module.exports = { start, switchReason };

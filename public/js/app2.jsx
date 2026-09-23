@@ -1466,6 +1466,20 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
     else setTvResetBusy(false);
   };
 
+  // Plain switch of the soundbar to its TV input: releases the MA queue, then selects
+  // PRODUCT/TV (mirrors tvWatcher's auto-switch). No ARC/CEC/standby reset — use ↺ for that.
+  const switchTvInput = async (spk) => {
+    setTvResetBusy(true);
+    try {
+      await fetch('/ha/tv-input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakerName: spk.name, ip: spk.ip }),
+      });
+    } catch {}
+    setTvResetBusy(false);
+  };
+
   useEffect(() => { setUpnpRepeatLocal(master?.upnpRepeat || 'REPEAT_OFF'); }, [master?.upnpRepeat]);
 
   useEffect(() => {
@@ -1670,6 +1684,10 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
                 ))}
                 {spk.reachable && spk.name === 'Bose-Sunroom 300' && (
                   <>
+                    <button onClick={() => switchTvInput(spk)} disabled={tvResetBusy} title="Switch the soundbar to TV input"
+                      className={'p-1 rounded transition ' + (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-blue-400 hover:bg-slate-700')}>
+                      📺
+                    </button>
                     <button onClick={() => resetTvAudio(spk)} disabled={tvResetBusy} title="Reset TV audio (ARC re-handshake)"
                       className={'p-1 rounded transition ' + (tvResetBusy ? 'text-slate-600 cursor-wait' : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-700')}>
                       {tvResetBusy ? '…' : '↺'}
@@ -1905,24 +1923,17 @@ function GroupCard({ group, onVolumeChange, onMute, onKey, onRemoveFromGroup, on
       <div className="px-4 py-3 border-t border-slate-700/60">
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Home</h3>
         <div className="flex gap-1.5 flex-wrap items-center">
-          {haConfig?.releaseToTV?.includes(master?.name) && (<>
-            <button onClick={() => resetTvAudio({ name: master?.name, ip: group.masterIp })}
-              disabled={tvResetBusy}
-              className="px-3 py-1.5 bg-slate-700 hover:bg-blue-800 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition disabled:opacity-50">
-              {tvResetBusy ? '📺 …' : '📺 TV Input'}
+          {haConfig?.releaseToTV?.includes(master?.name) && haConfig?.hasAppleTvPlug && (<>
+            <button onClick={async () => {
+                if (!window.confirm('Power-cycle the Apple TV? It cuts power for 10s and reboots (~30s). Fixes wedged HDMI audio.')) return;
+                setAtvCycleBusy(true);
+                try { await fetch('/ha/appletv-power-cycle', { method: 'POST' }); } catch {}
+                setTimeout(() => setAtvCycleBusy(false), 45000);
+              }}
+              disabled={atvCycleBusy}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-red-900 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition disabled:opacity-50">
+              {atvCycleBusy ? '⚡ rebooting…' : '⚡ Apple TV'}
             </button>
-            {haConfig?.hasAppleTvPlug && (
-              <button onClick={async () => {
-                  if (!window.confirm('Power-cycle the Apple TV? It cuts power for 10s and reboots (~30s). Fixes wedged HDMI audio.')) return;
-                  setAtvCycleBusy(true);
-                  try { await fetch('/ha/appletv-power-cycle', { method: 'POST' }); } catch {}
-                  setTimeout(() => setAtvCycleBusy(false), 45000);
-                }}
-                disabled={atvCycleBusy}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-red-900 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition disabled:opacity-50">
-                {atvCycleBusy ? '⚡ rebooting…' : '⚡ Apple TV'}
-              </button>
-            )}
             <div className="w-px h-5 bg-slate-600 flex-shrink-0"/>
           </>)}
           <button onClick={async () => { await maybeAdopt(); onOpenNas(); }}

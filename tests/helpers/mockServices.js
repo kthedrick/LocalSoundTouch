@@ -7,6 +7,7 @@ function createMockServer() {
   const maHandlers = {};          // MA command → fn(args) → response
   let   haStates   = [];          // GET /api/states response
   let   boseNowPlaying = '<nowPlaying source="AIRPLAY"><ContentItem source="AIRPLAY"/></nowPlaying>';
+  let   boseCecMode = 'CEC_MODE_ON';
   const failServicePrefixes = [];   // HA service paths that should return 500 (e.g. webostv when TV unreachable)
 
   const server = http.createServer((req, res) => {
@@ -47,6 +48,12 @@ function createMockServer() {
       if (req.method === 'POST' && req.url === '/key')    return send(200, '<status>ok</status>', 'application/xml');
       if (req.method === 'GET'  && req.url === '/now_playing') return send(200, boseNowPlaying, 'application/xml');
       if (req.method === 'GET'  && req.url === '/info')   return send(200, '<info><name>Mock</name></info>', 'application/xml');
+      if (req.method === 'GET'  && req.url === '/productcechdmicontrol')
+        return send(200, `<productcechdmicontrol cecmode="${boseCecMode}" />`, 'application/xml');
+      if (req.method === 'POST' && req.url === '/productcechdmicontrol') {
+        boseCecMode = (String(raw).match(/cecmode="([^"]+)"/) || [])[1] || boseCecMode;
+        return send(200, '<status>ok</status>', 'application/xml');
+      }
 
       send(404, { error: 'mock: unhandled ' + req.method + ' ' + req.url });
     });
@@ -60,10 +67,13 @@ function createMockServer() {
         onMa(command, fn) { maHandlers[command] = fn; },
         setStates(states) { haStates = states; },
         setBoseNowPlaying(xml) { boseNowPlaying = xml; },
+        setBoseCecMode(mode) { boseCecMode = mode; },
+        get boseCecMode() { return boseCecMode; },
         failService(pathPrefix) { failServicePrefixes.push(pathPrefix); },
         reset() {
           requests.length = 0; Object.keys(maHandlers).forEach(k => delete maHandlers[k]); haStates = [];
           boseNowPlaying = '<nowPlaying source="AIRPLAY"><ContentItem source="AIRPLAY"/></nowPlaying>';
+          boseCecMode = 'CEC_MODE_ON';
           failServicePrefixes.length = 0;
         },
         // Poll until a recorded request matches (for fire-and-forget calls like boseSwitchInput)

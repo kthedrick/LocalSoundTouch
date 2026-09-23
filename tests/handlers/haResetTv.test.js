@@ -16,6 +16,7 @@ before(async () => {
   mock = await createMockServer();
   process.env.LST_BOSE_PORT = String(mock.port);
   process.env.LST_RESET_STEP_MS = '20';
+  process.env.LST_TVINPUT_SETTLE_MS = '20';
   fixtures.writeHaConfig({
     mockPort: mock.port,
     overrides: {
@@ -64,6 +65,64 @@ test('soft reset: MA release, POWER cycle, ARC bounce around TV select, Apple TV
   // Apple TV was the active input → woken so HDMI signal is present for the handshake
   assert.ok(mock.requests.some(x => x.path === '/api/services/remote/turn_on'), 'Apple TV wake fired');
   assert.deepEqual(d.warnings, [], 'no warnings when every step succeeds');
+});
+
+test('soft reset: CEC dropped to OFF around the POWER press, restored before ARC bounce', async () => {
+  lgTvOn();
+  mock.setBoseCecMode('CEC_MODE_ON');
+  const r = await post('/ha/reset-tv-audio', { speakerName: 'Bose-Sunroom 300', ip: '127.0.0.1' });
+  const d = await r.json();
+  assert.equal(d.ok, true);
+  assert.equal(d.cecSuppressed, true, 'reported CEC suppression');
+
+  const cecPosts = mock.requests.filter(x => x.path === '/productcechdmicontrol' && x.method === 'POST');
+  assert.equal(cecPosts.length, 2, 'suppress + restore');
+  assert.match(cecPosts[0].body, /CEC_MODE_OFF/);
+  assert.match(cecPosts[1].body, /CEC_MODE_ON/);
+
+  // CEC OFF wraps the POWER press; restored BEFORE the ARC bounce (which needs CEC).
+  const idx = p => mock.requests.findIndex(p);
+  const iSuppress = idx(x => x.path === '/productcechdmicontrol' && /CEC_MODE_OFF/.test(x.body || ''));
+  const iPower    = idx(x => x.path === '/key' && /press.*POWER/.test(x.body || ''));
+  const iRestore  = idx(x => x.path === '/productcechdmicontrol' && x.method === 'POST' && /CEC_MODE_ON/.test(x.body || ''));
+  const iTvSpeaker = idx(x => x.path === '/api/services/webostv/select_sound_output' && x.body?.sound_output === 'tv_speaker');
+  assert.ok(iSuppress >= 0 && iSuppress < iPower, 'CEC dropped before POWER press');
+  assert.ok(iPower < iRestore, 'CEC restored after POWER press');
+  assert.ok(iRestore < iTvSpeaker, 'CEC restored before the ARC bounce begins');
+  assert.equal(mock.boseCecMode, 'CEC_MODE_ON', 'final mode restored');
+});
+
+test('soft reset: already in standby → no POWER press, no CEC writes', async () => {
+  lgTvOn('Live TV');
+  mock.setBoseCecMode('CEC_MODE_ON');
+  mock.setBoseNowPlaying('<nowPlaying deviceID="X" source="STANDBY"><ContentItem source="STANDBY"/></nowPlaying>');
+  const r = await post('/ha/reset-tv-audio', { speakerName: 'Bose-Sunroom 300', ip: '127.0.0.1' });
+  const d = await r.json();
+  assert.equal(d.ok, true);
+  assert.equal(d.cecSuppressed, false, 'no standby press → no CEC suppression needed');
+  assert.equal(mock.requests.filter(x => x.path === '/productcechdmicontrol' && x.method === 'POST').length, 0);
+});
+
+test('tv-input: releases MA queue then selects TV input — no reset ceremony', async () => {
+  lgTvOn();
+  const r = await post('/ha/tv-input', { speakerName: 'Bose-Sunroom 300', ip: '127.0.0.1' });
+  const d = await r.json();
+  assert.equal(d.ok, true);
+  assert.equal(d.switched, true);
+  // MA queue released (speaker + AirPlay group) so nothing grabs the speaker back
+  assert.deepEqual(maCalls('player_queues/stop').map(a => a.queue_id).sort(), [Q.airplayGroup, Q.sunroom].sort());
+  assert.deepEqual(maCalls('player_queues/clear').map(a => a.queue_id).sort(), [Q.airplayGroup, Q.sunroom].sort());
+  // Selected the TV input
+  assert.ok(mock.requests.some(x => x.path === '/select' && /source="PRODUCT"/.test(x.body) && /sourceAccount="TV"/.test(x.body)), 'PRODUCT/TV selected');
+  // None of the reset ceremony: no POWER press, no CEC toggle, no LG webostv calls
+  assert.equal(mock.requests.filter(x => x.path === '/key').length, 0, 'no POWER press');
+  assert.equal(mock.requests.filter(x => x.path === '/productcechdmicontrol').length, 0, 'no CEC calls');
+  assert.ok(!mock.requests.some(x => x.path.startsWith('/api/services/webostv/')), 'no LG webostv calls');
+});
+
+test('tv-input: missing ip → error', async () => {
+  const r = await post('/ha/tv-input', { speakerName: 'Bose-Sunroom 300' });
+  assert.equal((await r.json()).ok, false);
 });
 
 test('soft reset: webostv 500 (TV unreachable) → ok but warning says ARC bounce did not happen', async () => {

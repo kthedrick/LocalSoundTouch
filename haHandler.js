@@ -153,6 +153,27 @@ function boseKey(ip, key) {
   return send('press').then(() => sleep(100)).then(() => send('release'));
 }
 
+// Read/set the ST300's HDMI-CEC mode via the Bose HTTP API — the same
+// `/productcechdmicontrol` call the settings UI uses. Modes: CEC_MODE_ON |
+// CEC_MODE_ALTERNATE_ON | CEC_MODE_OFF. ALTERNATE_ON keeps CEC audio/ARC but
+// stops the soundbar power-syncing the TV (so its standby won't power off the LG).
+function boseGetCecMode(ip) {
+  return boseGet(ip, '/productcechdmicontrol')
+    .then(xml => (String(xml).match(/cecmode="([^"]+)"/) || [])[1] || null);
+}
+function boseSetCecMode(ip, mode) {
+  const body = `<productcechdmicontrol cecmode="${mode}" />`;
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: ip, port: BOSE_PORT, path: '/productcechdmicontrol', method: 'POST',
+      headers: { 'Content-Type': 'application/xml', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
+    req.setTimeout(5000, () => req.destroy(new Error('Bose /productcechdmicontrol timeout: ' + ip)));
+    req.on('error', reject);
+    req.write(body); req.end();
+  });
+}
+
 // Hard reboot via the SoundTouch diagnostic console (TCP 17000, open on LAN).
 // The only API-level way to fully re-initialize the ST300's HDMI board.
 function boseConsoleReboot(ip) {
@@ -679,20 +700,60 @@ async function handleHa(req, res) {
         return;
       }
 
-      // Soft: power-cycle to standby first (unless already there), then re-handshake
-      const np = await boseGet(ip, '/now_playing').catch(() => '');
-      const inStandby = /source="STANDBY"/.test(np);
-      if (!inStandby) { await boseKey(ip, 'POWER'); await sleep(step); }
-      const { tv, warnings } = await arcResetSequence(ip, step);
-      // Detect an AirPlay client (usually the Apple TV) re-grabbing the speaker —
-      // it steals the input back and, worse, means no audio flows over HDMI at all.
-      await sleep(step);
-      const after = await boseGet(ip, '/now_playing').catch(() => '');
-      if (/source="AIRPLAY"/.test(after) && /PLAY_STATE/.test(after)) {
-        warnings.push('An AirPlay device re-grabbed the speaker right after the reset — probably the Apple TV. Set its audio output to TV Speakers (hold TV button on Siri remote → Audio), then run the reset again.');
+      // The soundbar entering standby broadcasts CEC System Standby, which powers the
+      // LG off. Suppress CEC on the Bose ONLY around the standby press, then restore it
+      // BEFORE the ARC re-handshake (which needs CEC on the Bose to re-negotiate). Default
+      // CEC_MODE_OFF is the strongest suppression and is safe here because it's restored
+      // before the handshake. Override via LST_RESET_CEC_MODE.
+      const resetCec = process.env.LST_RESET_CEC_MODE || 'CEC_MODE_OFF';
+      const priorCec = await boseGetCecMode(ip).catch(() => null);
+      const canSuppress = priorCec && priorCec !== resetCec;
+      let didSuppress = false, pendingRestore = false;
+      let tv, warnings;
+      try {
+        // Power-cycle to standby (unless already there). Wrap only the POWER press in CEC
+        // suppression so the standby broadcast can't reach the TV, then put CEC back for
+        // the re-handshake that follows.
+        const np = await boseGet(ip, '/now_playing').catch(() => '');
+        const inStandby = /source="STANDBY"/.test(np);
+        if (!inStandby) {
+          if (canSuppress) { await boseSetCecMode(ip, resetCec).catch(() => {}); didSuppress = pendingRestore = true; await sleep(step); }
+          await boseKey(ip, 'POWER'); await sleep(step);
+          if (pendingRestore) { await boseSetCecMode(ip, priorCec).catch(() => {}); pendingRestore = false; await sleep(step); }
+        }
+        ({ tv, warnings } = await arcResetSequence(ip, step));
+        // Detect an AirPlay client (usually the Apple TV) re-grabbing the speaker —
+        // it steals the input back and, worse, means no audio flows over HDMI at all.
+        await sleep(step);
+        const after = await boseGet(ip, '/now_playing').catch(() => '');
+        if (/source="AIRPLAY"/.test(after) && /PLAY_STATE/.test(after)) {
+          warnings.push('An AirPlay device re-grabbed the speaker right after the reset — probably the Apple TV. Set its audio output to TV Speakers (hold TV button on Siri remote → Audio), then run the reset again.');
+        }
+      } finally {
+        if (pendingRestore) await boseSetCecMode(ip, priorCec).catch(() => {});
       }
-      console.log('[reset-tv] soft reset done for %s tvOn=%s warnings=%j', ip, tv.on, warnings);
-      ok(res, { reset: 'soft', tvOn: tv.on, warnings });
+      console.log('[reset-tv] soft reset done for %s tvOn=%s cec=%s→%s→%s warnings=%j',
+        ip, tv?.on, priorCec || '(unknown)', didSuppress ? resetCec : '(unchanged)', priorCec || '(unknown)', warnings);
+      ok(res, { reset: 'soft', tvOn: tv?.on, cecSuppressed: didSuppress, warnings });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  // POST /ha/tv-input — plain switch of a soundbar to its TV (PRODUCT/TV) input.
+  // Mirrors tvWatcher's proven auto-switch: release the MA queue so AirPlay/Pandora
+  // can't grab the speaker back, wait for it to settle out of INVALID_SOURCE after the
+  // AirPlay drop, then select the TV input. NO CEC/standby/ARC ceremony — that's what
+  // /ha/reset-tv-audio (↺) is for.
+  if (url === '/ha/tv-input' && req.method === 'POST') {
+    const body = await readBody(req);
+    const ip = body.ip;
+    if (!ip) { err(res, 'ip required'); return; }
+    try {
+      await releaseSpeakerQueues(body.speakerName);
+      await sleep(parseInt(process.env.LST_TVINPUT_SETTLE_MS) || 3000);
+      await boseSwitchInput(ip, 'PRODUCT', 'TV');
+      console.log('[tv-input] %s → TV input', ip);
+      ok(res, { switched: true });
     } catch (e) { err(res, e.message); }
     return;
   }
